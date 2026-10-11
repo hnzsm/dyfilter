@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>抖音推荐流过滤器</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="head">
+      <div class="head-row">
+        <span class="title">抖音推荐流过滤器</span>
+        <label class="switch">
+          <input type="checkbox" id="enabled" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <p class="subtitle">只过滤首页推荐流 · 接口层无痕屏蔽</p>
+    </header>
+
+    <section class="card">
+      <div class="field">
+        <label class="field-label" for="hours">隐藏发布超过</label>
+        <div class="input-wrap">
+          <input type="number" id="hours" min="1" max="87600" />
+          <span class="unit">小时</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <label class="field-label" for="keywords">屏蔽关键字</label>
+      <p class="hint-sub">每行一个，匹配标题或作者名</p>
+      <textarea id="keywords" rows="5" placeholder="例如：&#10;直播预告&#10;某某博主"></textarea>
+    </section>
+
+    <div class="actions">
+      <button id="save">保存设置</button>
+      <span id="hint"></span>
+    </div>
+
+    <section class="card stats-card">
+      <div class="stats-head">运行状态</div>
+      <p id="stats" class="stats"></p>
+    </section>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
