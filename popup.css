@@ -21,7 +21,9 @@ body {
 .app { padding: 14px; }
 
 .head { margin-bottom: 12px; }
-.head-row { display: flex; align-items: center; justify-content: space-between; }
+.head-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.logo { width: 26px; height: 26px; border-radius: 7px; flex: none; display: block; }
 .title { font-size: 16px; font-weight: 700; letter-spacing: .2px; }
 .subtitle { margin: 3px 0 0; color: var(--sub); font-size: 12px; }
 

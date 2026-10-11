@@ -4,9 +4,20 @@
   "version": "0.2.0",
   "description": "按发布日期和关键字自动跳过抖音网页版首页推荐流的视频",
   "permissions": ["storage"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "抖音推荐流过滤器"
+    "default_title": "抖音推荐流过滤器",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
   },
   "content_scripts": [
     {
