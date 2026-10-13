@@ -84,11 +84,24 @@
   const cardTitle = (o) => fieldOf(o, TITLE_KEYS);
   const cardNick = (o) => fieldOf(o, NICK_KEYS);
   const cardSec = (o) => fieldOf(o, SEC_KEYS);
+  // 播放地址：content.js 用它把"正在播的 video"对回接口卡片，不依赖 data-e2e-vid
+  const playUrlOf = (o) => {
+    const v = isObj(o) && o.video;
+    if (!isObj(v)) return "";
+    const lists = [
+      isObj(v.play_addr) && v.play_addr.url_list,
+      v.url_list,
+      isObj(v.download_addr) && v.download_addr.url_list,
+    ];
+    for (const list of lists) if (Array.isArray(list) && typeof list[0] === "string") return list[0];
+    return "";
+  };
   const cardMeta = (o) => ({
     id: idOf(o),
     desc: cardTitle(o),
     nick: cardNick(o),
     sec: cardSec(o),
+    url: playUrlOf(o),
     ct: timeOf(o),
     live: isLive(o) ? 1 : 0,
   });

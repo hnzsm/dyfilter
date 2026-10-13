@@ -76,7 +76,18 @@ const renderStats = () => {
     return;
   }
   chrome.storage.local.get(
-    { capturedCount: 0, seamlessCount: 0, skippedCount: 0, hookTs: 0, contentTs: 0, patchMode: "", cfgHours: 0, loggedIn: 1 },
+    {
+      capturedCount: 0,
+      seamlessCount: 0,
+      skippedCount: 0,
+      hookTs: 0,
+      contentTs: 0,
+      patchMode: "",
+      cfgHours: 0,
+      loggedIn: 1,
+      authorDbg: "",
+      authorDbgTs: 0,
+    },
     (st) => {
       if (chrome.runtime.lastError) return;
       const now = Date.now();
@@ -88,6 +99,9 @@ const renderStats = () => {
         `无痕屏蔽 ${st.seamlessCount} 个　滚动跳过 ${st.skippedCount} 个`,
         `页面生效阈值：${st.cfgHours} 小时`,
       ];
+      if (st.authorDbg && now - st.authorDbgTs < 300000) {
+        lines.push(`上次拉黑没认出作者：${st.authorDbg}（把这行发我）`);
+      }
       if (ok(st.contentTs, 15000) && !st.loggedIn) {
         lines.push("顶栏还有「登录」按钮：视为未登录，右键菜单里不给「拉黑该作者」。");
       } else if (!ok(st.contentTs, 15000)) {

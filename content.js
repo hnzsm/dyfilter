@@ -108,6 +108,8 @@
       for (const m of d.metas) {
         if (m && m.id && !metas.has(m.id)) {
           metas.set(String(m.id), m);
+          const key = urlKey(m.url);
+          if (key && !urlIndex.has(key)) urlIndex.set(key, String(m.id));
           if (String(m.id) === currentVid) evaluate(currentVid, true);
         }
       }
@@ -214,27 +216,86 @@
 
   function findCurrentVid() {
     const v = playingVideo();
-    const holder = v && v.closest("[data-e2e-vid]");
+    const holder = v && v.closest && v.closest("[data-e2e-vid]");
     return holder ? holder.getAttribute("data-e2e-vid") : null;
   }
 
-  function playingVideo() {
+  function playingVideos() {
+    const out = [];
     for (const v of document.querySelectorAll("video")) {
       if (v.paused || v.ended || v.readyState < 2) continue;
-      return v;
+      out.push(v);
     }
-    return null;
+    return out;
   }
 
-  // 接口元数据没认出来时退回页面 DOM：从播放中的 video 往上找作者链接，
-  // 抖音的作者链接形如 /user/<sec_uid>，昵称就是链接文字。
+  function playingVideo() {
+    const list = playingVideos();
+    if (!list.length) return null;
+    if (list.length === 1) return list[0];
+    // 预加载的下一条未必处于 paused，按 DOM 顺序取会认错卡片：取视口里占面积最大的
+    const vw = window.innerWidth || 0;
+    const vh = window.innerHeight || 0;
+    let best = null;
+    let bestArea = 0;
+    for (const v of list) {
+      const r = v.getBoundingClientRect ? v.getBoundingClientRect() : null;
+      if (!r) continue;
+      const w = Math.min(r.right, vw) - Math.max(r.left, 0);
+      const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+      const area = Math.max(0, w) * Math.max(0, h);
+      if (area > bestArea) {
+        bestArea = area;
+        best = v;
+      }
+    }
+    return best || list[0];
+  }
+
+  // 播放地址 → 卡片 id 的索引。抖音的 data-e2e-vid 一改名，接口元数据和 DOM 就对不上号了，
+  // 而播放器 src 和接口里的 play_addr 是同一条路径（签名在 query 上），按路径匹配不依赖任何属性名。
+  const urlKey = (u) => {
+    const s = String(u || "");
+    if (!s || s.startsWith("blob:") || s.startsWith("data:")) return "";
+    const path = s.replace(/^[a-z]+:\/\//i, "").split("?")[0].split("#")[0];
+    const segs = path.split("/").filter(Boolean);
+    return segs.slice(-2).join("/");
+  };
+  const urlIndex = new Map();
+
+  const userLinkCount = () => {
+    try {
+      return document.querySelectorAll("a[href*='/user/']").length;
+    } catch (e) {
+      return -1;
+    }
+  };
+
+  // 认不出作者时把各环节的计数打出来：是哪一条链断了，看提示就知道，不用猜
+  function authorDiag() {
+    const v = playingVideo();
+    const src = v ? String(v.currentSrc || v.src || "") : "";
+    const key = urlKey(src);
+    return [
+      `视频${document.querySelectorAll("video").length}`,
+      `在播${playingVideos().length}`,
+      `vid键${findCurrentVid() ? "有" : "无"}`,
+      `元数据${metas.size}`,
+      `地址索引${urlIndex.size}`,
+      `src${src ? (key ? key.slice(-14) : src.slice(0, 5)) : "无"}`,
+      `作者链接${userLinkCount()}`,
+    ].join(" ");
+  }
+
+  // 页面上的作者链接：a[href*="/user/<sec_uid>"]，文字就是昵称
   function authorFromDom() {
     let node = playingVideo();
-    for (let up = 0; node && up < 8; up += 1, node = node.parentElement) {
+    for (let up = 0; node && up < 14; up += 1, node = node.parentElement) {
       const link = node.querySelector && node.querySelector('a[href*="/user/"]');
       if (!link) continue;
-      const nick = (link.textContent || "").trim();
-      if (!nick) return null;
+      const nick = (link.textContent || "").trim() || (link.title || "").trim();
+      // 图标链接等空文字的 a 很常见，跳过继续往上找，别在这里就放弃整条兜底
+      if (!nick) continue;
       const m = /\/user\/([^?#/]+)/.exec(link.href || "");
       let sec = "";
       try {
@@ -249,10 +310,17 @@
 
   function currentAuthor() {
     const vid = currentVid || findCurrentVid();
-    const meta = vid ? metas.get(vid) : null;
+    const meta = (vid && metas.get(vid)) || metaByPlayUrl();
     if (meta && meta.nick) return { nick: String(meta.nick).trim(), sec: meta.sec || "", via: "接口" };
     const dom = authorFromDom();
     return dom ? { ...dom, via: "页面" } : null;
+  }
+
+  function metaByPlayUrl() {
+    const v = playingVideo();
+    const key = urlKey(v && (v.currentSrc || v.src));
+    const id = key && urlIndex.get(key);
+    return id ? metas.get(id) : null;
   }
 
   let toastEl = null;
@@ -276,7 +344,9 @@
   function blockCurrentAuthor() {
     const who = currentAuthor();
     if (!who) {
-      toast(`没认出手上这条的作者（已捕获 ${metas.size} 条），等它播起来再试`, 3500);
+      const diag = authorDiag();
+      if (ctxOk()) chrome.storage.local.set({ authorDbg: diag, authorDbgTs: Date.now() });
+      toast(`没认出手上这条的作者：${diag}`, 6000);
       return;
     }
     chrome.storage.sync.get(LEGACY_DEFAULTS, (stored) => {

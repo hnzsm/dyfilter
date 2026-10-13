@@ -49,6 +49,18 @@ const el = ({ text = "", rect = { left: 0, top: 0, width: 0, height: 0 }, positi
   return node;
 };
 
+// 播放中的视频元素：vidKey 模拟 data-e2e-vid（抖音改名时它就没了）
+const mkVideo = ({ vidKey = "V1", src = "", rect = { left: 0, top: 0, right: 400, bottom: 700 }, paused = false } = {}, holder) => ({
+  nodeType: 1,
+  paused,
+  ended: false,
+  readyState: 3,
+  currentSrc: src,
+  parentElement: holder || null,
+  closest: (sel) => (sel === "[data-e2e-vid]" && vidKey ? { getAttribute: () => vidKey } : null),
+  getBoundingClientRect: () => rect,
+});
+
 const boot = (initialSync, { loginButtons = [] } = {}) => {
   const syncData = { ...initialSync };
   const localData = {};
@@ -60,19 +72,12 @@ const boot = (initialSync, { loginButtons = [] } = {}) => {
   const changedHandlers = [];
   const intervals = [];
   const timeouts = [];
+  const userLinks = [];
   let observerCb = null;
   let pointStack = [];
 
-  // 播放中的视频：默认挂在 cardHolder 下，cardHolder 里可以放作者链接
   const cardHolder = el({ text: "" });
-  const video = {
-    nodeType: 1,
-    paused: false,
-    ended: false,
-    readyState: 3,
-    parentElement: cardHolder,
-    closest: (sel) => (sel === "[data-e2e-vid]" ? { getAttribute: () => "V1" } : null),
-  };
+  let videos = [mkVideo({}, cardHolder)];
 
   const chrome = {
     runtime: {
@@ -98,6 +103,8 @@ const boot = (initialSync, { loginButtons = [] } = {}) => {
   };
 
   const windowStub = {
+    innerWidth: 800,
+    innerHeight: 800,
     addEventListener: (t, fn) => handlers.message.push(fn),
     MutationObserver: class {
       constructor(cb) {
@@ -117,7 +124,12 @@ const boot = (initialSync, { loginButtons = [] } = {}) => {
     addEventListener: (t, fn) => (handlers[t] || handlers.message).push(fn),
     dispatchEvent: () => {},
     elementsFromPoint: () => pointStack,
-    querySelectorAll: (sel) => (sel === "video" ? [video] : sel.includes("button") ? loginButtons : []),
+    querySelectorAll: (sel) => {
+      if (sel === "video") return videos;
+      if (sel.includes("button")) return loginButtons;
+      if (sel.includes("/user/")) return userLinks;
+      return [];
+    },
     createElement: () => {
       const node = el();
       Object.defineProperty(node, "textContent", {
@@ -162,12 +174,20 @@ const boot = (initialSync, { loginButtons = [] } = {}) => {
     toasts,
     bodyEvents,
     el,
-    // 页面上有没有可见的「登录」按钮 = content.js 判断登录态的依据
+    mkVideo,
+    setVideos: (list) => {
+      videos = list;
+    },
     setLoginButtons: (list) => {
       loginButtons.length = 0;
       for (const b of list) loginButtons.push(el(b));
     },
-    // 页面上的作者链接：a[href*="/user/<sec_uid>"]，文字就是昵称
+    // 页面上作者链接的数量（诊断信息里会带上）
+    setUserLinks: (list) => {
+      userLinks.length = 0;
+      for (const b of list) userLinks.push(el(b));
+    },
+    // 播放卡片里的作者链接：a[href*="/user/<sec_uid>"]，文字就是昵称
     setDomAuthor: (href, text) => {
       cardHolder.children.length = 0;
       cardHolder.appendChild(el({ text, href }));
@@ -239,25 +259,74 @@ const ok = (cond, label) => {
   ok(menu.children.filter((c) => c.textContent === LABEL).length === 1, "同一菜单不重复注入");
 }
 
-// 2. 接口元数据缺失时退回页面 DOM 的作者链接
+// 2. data-e2e-vid 没了：靠播放地址把 video 对回接口卡片
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
-  ctx.setDomAuthor("https://www.douyin.com/user/MS4wLjABAAAAx?from_nav=1", "链接博主");
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "https://v26-web.douyin.com/aaa/video/tos-cn-p-0015/abc123?sign=xyz" }, null)]);
+  ctx.feed([{ id: "V9", desc: "d", nick: "地址博主", sec: "SEC_URL", ct: 1, live: 0, url: "https://v26-web.douyin.com/aaa/video/tos-cn-p-0015/abc123?a=1" }]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_URL", nick: "地址博主" }]), "无 vid 键时按播放地址认出作者");
+}
+
+// 3. 接口元数据完全对不上：退回页面 DOM 的作者链接
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "" }, null)]);
+  const holder = el({ text: "" });
+  holder.appendChild(el({ text: "链接博主", href: "https://www.douyin.com/user/MS4wLjABAAAAx?from_nav=1" }));
+  ctx.setVideos([ctx.mkVideo({ vidKey: "" }, holder)]);
   ctx.tick();
   ctx.blockViaMenu();
   ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "MS4wLjABAAAAx", nick: "链接博主" }]), "从页面链接认出 sec_uid+昵称");
 }
 
-// 3. 两条路都认不出：只提示，不写坏配置
+// 3.1 播放器用 blob（MSE）时不硬套地址索引，退回页面链接；空文字链接也不能终止查找
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.feed([{ id: "V8", desc: "d", nick: "接口博主", sec: "SEC_V8", ct: 1, live: 0, url: "https://v26-web.douyin.com/aaa/video/tos-cn-p-0015/abc123?a=1" }]);
+  const holder = el({ text: "" });
+  holder.appendChild(el({ text: "" })); // 空文字图标链接：必须跳过继续找
+  holder.appendChild(el({ text: "链接博主", href: "https://www.douyin.com/user/SEC_BLOB" }));
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "blob:https://www.douyin.com/7d9f-1" }, holder)]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(ctx.toasts.some((t) => t.includes("没认出手上这条的作者")), "认不出作者时给出提示");
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_BLOB", nick: "链接博主" }]), "blob 播放源时按页面链接认出作者，不被地址索引误判");
+}
+
+// 4. 预加载的下一条也在播：取视口里占面积最大的那个视频
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  const holder = el({ text: "" });
+  holder.appendChild(el({ text: "在播的这条", href: "https://www.douyin.com/user/SEC_ON" }));
+  ctx.setVideos([
+    ctx.mkVideo({ vidKey: "", src: "" }, null), // DOM 里排在前面的预加载卡片，视口外
+    ctx.mkVideo({ vidKey: "", src: "" }, holder),
+  ]);
+  ctx.setVideos([
+    Object.assign(ctx.mkVideo({ vidKey: "", src: "" }, null), { getBoundingClientRect: () => ({ left: 0, top: -800, right: 400, bottom: -100 }) }),
+    ctx.mkVideo({ vidKey: "", src: "" }, holder),
+  ]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(ctx.syncData.blocked.some((b) => b.nick === "在播的这条"), "选中的是视口里在播的那条而不是预加载卡片");
+}
+
+// 5. 三条路都认不出：提示里带上各环节计数，并写进诊断
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "" }, null)]);
+  ctx.setUserLinks([]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  const diag = ctx.toasts.find((t) => t.includes("没认出手上这条的作者"));
+  ok(!!diag, "认不出作者时给出提示");
+  ok(/元数据0/.test(diag) && /vid键无/.test(diag) && /作者链接0/.test(diag), `提示里含各环节计数：${diag}`);
+  ok(typeof ctx.localData.authorDbg === "string" && ctx.localData.authorDbg.includes("元数据0"), "诊断写入 storage.local 供弹窗展示");
   ok(ctx.syncData.blocked.length === 0, "认不出作者时不写 blocked");
 }
 
-// 4. 重复拉黑去重（按 sec_uid）
+// 6. 重复拉黑去重（按 sec_uid）
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [{ sec: "SEC_A", nick: "旧名字" }] });
   ctx.feed([{ id: "V1", desc: "d", nick: "新名字", sec: "SEC_A", ct: 1, live: 0 }]);
@@ -267,14 +336,14 @@ const ok = (cond, label) => {
   ok(ctx.toasts.some((t) => t.includes("已经拉黑了")), "重复拉黑给出提示");
 }
 
-// 5. 登录态：只在页面上有可见「登录」按钮时才当作未登录（判不准就给入口）
+// 7. 登录态：只在顶栏有「登录」按钮时才当作未登录（判不准就给入口）
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx.setLoginButtons([{ text: "登录", rect: { left: 1200, top: 20, width: 64, height: 32 } }]);
   ctx.contextmenu();
   let menu = ctx.makeMenu();
   ctx.fireMutation(menu);
-  ok(!ctx.injectedRow(menu), "有可见登录按钮时不注入拉黑行");
+  ok(!ctx.injectedRow(menu), "顶栏有登录按钮时不注入拉黑行");
 
   ctx.setLoginButtons([{ text: "登录", rect: { left: 0, top: 0, width: 0, height: 0 } }]);
   ctx.contextmenu();
@@ -296,7 +365,7 @@ const ok = (cond, label) => {
   ok(!!ctx.injectedRow(menu), "顶栏以外的登录按钮不影响给入口");
 }
 
-// 6. 菜单节点被复用（只切 display）时，走鼠标点元素栈兜住
+// 8. 菜单节点被复用（只切 display）时，走鼠标点元素栈兜住
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx.feed([{ id: "V1", desc: "d", nick: "复用博主", sec: "SEC_R", ct: 1, live: 0 }]);
@@ -308,7 +377,7 @@ const ok = (cond, label) => {
   ok(!!ctx.injectedRow(menu), "复用菜单也能被元素栈找到");
 }
 
-// 7. 不像菜单的浮层不乱注入
+// 9. 不像菜单的浮层不乱注入
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx.feed([{ id: "V1", desc: "d", nick: "某博主", sec: "SEC_A", ct: 1, live: 0 }]);
@@ -328,7 +397,7 @@ const ok = (cond, label) => {
   ok(ctx.syncData.blocked.length === 0, "注入本身不写黑名单，只有点击才写");
 }
 
-// 8. 没有右键锚点时，页面上冒出来的浮层不认作菜单
+// 10. 没有右键锚点时，页面上冒出来的浮层不认作菜单
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   const menu = ctx.makeMenu();
@@ -337,16 +406,7 @@ const ok = (cond, label) => {
   ok(menu.children.length === 2, "没有右键锚点时菜单保持原样");
 }
 
-// 9. 浏览器原生右键菜单入口仍在（播放器以外的区域可用）
-{
-  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
-  ctx.feed([{ id: "V1", desc: "d", nick: "原生入口博主", sec: "SEC_N", ct: 1, live: 0 }]);
-  ctx.tick();
-  ctx.blockViaMenu();
-  ok(ctx.syncData.blocked.some((b) => b.sec === "SEC_N"), "runtime 消息入口仍可用");
-}
-
-// 10. 拉黑名单随配置广播给 hook.js
+// 11. 拉黑名单随配置广播给 hook.js
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx.feed([{ id: "V1", desc: "d", nick: "广播博主", sec: "SEC_B", ct: 1, live: 0 }]);
