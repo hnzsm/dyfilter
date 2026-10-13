@@ -106,11 +106,20 @@
     if (!d || d.source !== "dyfilter") return;
     if (d.type === "feed" && Array.isArray(d.metas)) {
       for (const m of d.metas) {
-        if (m && m.id && !metas.has(m.id)) {
-          metas.set(String(m.id), m);
+        const id = m && m.id && String(m.id);
+        if (id && !metas.has(id)) {
+          metas.set(id, m);
           const key = urlKey(m.url);
-          if (key && !urlIndex.has(key)) urlIndex.set(key, String(m.id));
-          if (String(m.id) === currentVid) evaluate(currentVid, true);
+          if (key && !urlIndex.has(key)) urlIndex.set(key, id);
+          const tail = urlTail(m.url);
+          if (tail) {
+            const n = (tailSeen.get(tail) || 0) + 1;
+            tailSeen.set(tail, n);
+            // 同一个文件名出现在两张卡片上就作废，不猜是哪条
+            if (n === 1) tailIndex.set(tail, id);
+            else tailIndex.delete(tail);
+          }
+          if (id === currentVid) evaluate(currentVid, true);
         }
       }
       reportStats();
@@ -254,14 +263,24 @@
 
   // 播放地址 → 卡片 id 的索引。抖音的 data-e2e-vid 一改名，接口元数据和 DOM 就对不上号了，
   // 而播放器 src 和接口里的 play_addr 是同一条路径（签名在 query 上），按路径匹配不依赖任何属性名。
-  const urlKey = (u) => {
+  const urlPath = (u) => {
     const s = String(u || "");
     if (!s || s.startsWith("blob:") || s.startsWith("data:")) return "";
-    const path = s.replace(/^[a-z]+:\/\//i, "").split("?")[0].split("#")[0];
-    const segs = path.split("/").filter(Boolean);
+    return s.replace(/^[a-z]+:\/\//i, "").split("?")[0].split("#")[0];
+  };
+  const urlKey = (u) => {
+    const segs = urlPath(u).split("/").filter(Boolean);
     return segs.slice(-2).join("/");
   };
+  const urlTail = (u) => {
+    const segs = urlPath(u).split("/").filter(Boolean);
+    const last = segs[segs.length - 1] || "";
+    return last.length >= 12 ? last : "";
+  };
   const urlIndex = new Map();
+  // 只按最后一段匹配时，先确认这段在整页里唯一，避免多张卡片撞成同一条
+  const tailSeen = new Map();
+  const tailIndex = new Map();
 
   const userLinkCount = () => {
     try {
@@ -275,37 +294,92 @@
   function authorDiag() {
     const v = playingVideo();
     const src = v ? String(v.currentSrc || v.src || "") : "";
-    const key = urlKey(src);
+    const vid = currentVid || findCurrentVid() || "";
+    let sample = "";
+    for (const k of metas.keys()) {
+      sample = k;
+      break;
+    }
     return [
       `视频${document.querySelectorAll("video").length}`,
       `在播${playingVideos().length}`,
-      `vid键${findCurrentVid() ? "有" : "无"}`,
+      `vid=${String(vid).slice(0, 10) || "无"}`,
       `元数据${metas.size}`,
-      `地址索引${urlIndex.size}`,
-      `src${src ? (key ? key.slice(-14) : src.slice(0, 5)) : "无"}`,
-      `作者链接${userLinkCount()}`,
+      `样例键=${sample.slice(0, 10) || "无"}`,
+      `地址索引${urlIndex.size}/${tailIndex.size}`,
+      `src=${urlTail(src).slice(-8) || "无"}`,
+      `作者链接${userLinkCount()} ${domNote || "近链ok"}`,
     ].join(" ");
   }
 
-  // 页面上的作者链接：a[href*="/user/<sec_uid>"]，文字就是昵称
-  function authorFromDom() {
-    let node = playingVideo();
-    for (let up = 0; node && up < 14; up += 1, node = node.parentElement) {
-      const link = node.querySelector && node.querySelector('a[href*="/user/"]');
-      if (!link) continue;
-      const nick = (link.textContent || "").trim() || (link.title || "").trim();
-      // 图标链接等空文字的 a 很常见，跳过继续往上找，别在这里就放弃整条兜底
-      if (!nick) continue;
-      const m = /\/user\/([^?#/]+)/.exec(link.href || "");
-      let sec = "";
-      try {
-        sec = m ? decodeURIComponent(m[1]) : "";
-      } catch (e) {
-        sec = m ? m[1] : "";
-      }
-      return { nick, sec };
+  // 作者链接的 sec_uid：href 形状比 class 稳，抖音改版也不受影响
+  function secOfHref(href) {
+    const m = /\/user\/([^?#/]+)/.exec(String(href || ""));
+    if (!m) return "";
+    try {
+      return decodeURIComponent(m[1]);
+    } catch (e) {
+      return m[1];
     }
-    return null;
+  }
+
+  // 两个矩形的间距；有重叠时为 0
+  const rectGap = (a, b) =>
+    Math.max(
+      Math.max(a.left - b.right, b.left - a.right, 0),
+      Math.max(a.top - b.bottom, b.top - a.bottom, 0)
+    );
+
+  // 头像那种 <a><img></a> 是没有文字的，昵称得从 alt / aria-label / 接口元数据里补
+  function nickOfLink(a, sec) {
+    for (const raw of [a.textContent, a.title, a.getAttribute && a.getAttribute("aria-label")]) {
+      const s = String(raw || "").trim();
+      if (s) return s;
+    }
+    const img = a.querySelector && a.querySelector("img");
+    const alt = img && String(img.alt || "").trim();
+    if (alt) return alt;
+    for (const m of metas.values()) if (m && m.sec === sec && m.nick) return String(m.nick).trim();
+    return `作者 ${String(sec).slice(0, 8)}`;
+  }
+
+  let domNote = "";
+
+  // 作者链接不保证是 video 的祖先节点（抖音把视频和右侧信息栏做成兄弟节点），
+  // 所以按"离在播视频最近"来认，而不是沿 parentElement 上溯——上溯到列表容器会抓到别的卡片。
+  const NEAR_LINK = 260;
+  function authorFromDom() {
+    domNote = "";
+    const v = playingVideo();
+    const r = v && v.getBoundingClientRect && v.getBoundingClientRect();
+    if (!r) {
+      domNote = "无在播视频";
+      return null;
+    }
+    const near = [];
+    for (const a of document.querySelectorAll('a[href*="/user/"]')) {
+      const sec = secOfHref(a.href);
+      if (!sec) continue;
+      const ar = a.getBoundingClientRect ? a.getBoundingClientRect() : null;
+      if (!ar || ar.width <= 0 || ar.height <= 0) continue;
+      const gap = rectGap(ar, r);
+      if (gap > NEAR_LINK) continue;
+      near.push({ a, sec, gap });
+    }
+    if (!near.length) {
+      domNote = "附近无作者链接";
+      return null;
+    }
+    near.sort((x, y) => x.gap - y.gap);
+    const best = near[0];
+    // 压在视频画面上的链接就是这一条的作者；够得着但没压住的，必须明显比对手更近才算数
+    const tol = best.gap > 0 ? Math.max(8, best.gap) : 8;
+    const rival = near.find((c) => c.sec !== best.sec && c.gap <= best.gap + tol);
+    if (rival) {
+      domNote = `两个作者链接同距(${Math.round(best.gap)}/${Math.round(rival.gap)}px)`;
+      return null;
+    }
+    return { nick: nickOfLink(best.a, best.sec), sec: best.sec };
   }
 
   function currentAuthor() {
@@ -318,8 +392,8 @@
 
   function metaByPlayUrl() {
     const v = playingVideo();
-    const key = urlKey(v && (v.currentSrc || v.src));
-    const id = key && urlIndex.get(key);
+    const src = v && (v.currentSrc || v.src);
+    const id = urlIndex.get(urlKey(src)) || tailIndex.get(urlTail(src));
     return id ? metas.get(id) : null;
   }
 

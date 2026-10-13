@@ -4,8 +4,28 @@ const SRC = readFileSync(new URL("./content.js", import.meta.url), "utf8");
 
 const LABEL = "拉黑该作者";
 
+// 真实 DOM 的 rect 同时有 left/top/width/height/right/bottom，桩里补齐，免得逻辑各写一套
+const norm = (r) => {
+  const left = r.left ?? 0;
+  const top = r.top ?? 0;
+  const width = r.width ?? (r.right != null ? r.right - left : 0);
+  const height = r.height ?? (r.bottom != null ? r.bottom - top : 0);
+  return { left, top, width, height, right: left + width, bottom: top + height };
+};
+
 // 最小 DOM 桩：够跑 content.js 用到的那几样（dataset / children / rect / computed style / querySelector）
-const el = ({ text = "", rect = { left: 0, top: 0, width: 0, height: 0 }, position = "", href = "", children = [] } = {}) => {
+const el = (
+  {
+    text = "",
+    rect = { left: 0, top: 0, width: 0, height: 0 },
+    position = "",
+    href = "",
+    title = "",
+    attrs = {},
+    img = null,
+    children = [],
+  } = {}
+) => {
   const node = {
     nodeType: 1,
     dataset: {},
@@ -18,8 +38,10 @@ const el = ({ text = "", rect = { left: 0, top: 0, width: 0, height: 0 }, positi
     _rect: rect,
     _href: href,
     href,
+    title,
     _handlers: {},
-    getBoundingClientRect: () => rect,
+    getAttribute: (name) => (Object.prototype.hasOwnProperty.call(attrs, name) ? attrs[name] : null),
+    getBoundingClientRect: () => norm(rect),
     addEventListener(type, fn) {
       (node._handlers[type] = node._handlers[type] || []).push(fn);
     },
@@ -33,6 +55,7 @@ const el = ({ text = "", rect = { left: 0, top: 0, width: 0, height: 0 }, positi
       return child;
     },
     querySelector(sel) {
+      if (sel === "img") return img;
       if (!sel.includes("/user/")) return null;
       for (const c of node.children) {
         if (c._href && c._href.includes("/user/")) return c;
@@ -58,7 +81,7 @@ const mkVideo = ({ vidKey = "V1", src = "", rect = { left: 0, top: 0, right: 400
   currentSrc: src,
   parentElement: holder || null,
   closest: (sel) => (sel === "[data-e2e-vid]" && vidKey ? { getAttribute: () => vidKey } : null),
-  getBoundingClientRect: () => rect,
+  getBoundingClientRect: () => norm(rect),
 });
 
 const boot = (initialSync, { loginButtons = [] } = {}) => {
@@ -269,59 +292,140 @@ const ok = (cond, label) => {
   ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_URL", nick: "地址博主" }]), "无 vid 键时按播放地址认出作者");
 }
 
-// 3. 接口元数据完全对不上：退回页面 DOM 的作者链接
+// 3. 接口元数据完全对不上：退回页面上离在播视频最近的作者链接
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
-  ctx.setVideos([ctx.mkVideo({ vidKey: "" }, null)]);
-  const holder = el({ text: "" });
-  holder.appendChild(el({ text: "链接博主", href: "https://www.douyin.com/user/MS4wLjABAAAAx?from_nav=1" }));
-  ctx.setVideos([ctx.mkVideo({ vidKey: "" }, holder)]);
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" })]);
+  ctx.setUserLinks([{ text: "链接博主", href: "https://www.douyin.com/user/MS4wLjABAAAAx?from_nav=1", rect: { left: 20, top: 600, width: 120, height: 24 } }]);
   ctx.tick();
   ctx.blockViaMenu();
   ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "MS4wLjABAAAAx", nick: "链接博主" }]), "从页面链接认出 sec_uid+昵称");
 }
 
-// 3.1 播放器用 blob（MSE）时不硬套地址索引，退回页面链接；空文字链接也不能终止查找
+// 3.1 播放器用 blob（MSE）时不硬套地址索引，退回页面链接
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx.feed([{ id: "V8", desc: "d", nick: "接口博主", sec: "SEC_V8", ct: 1, live: 0, url: "https://v26-web.douyin.com/aaa/video/tos-cn-p-0015/abc123?a=1" }]);
-  const holder = el({ text: "" });
-  holder.appendChild(el({ text: "" })); // 空文字图标链接：必须跳过继续找
-  holder.appendChild(el({ text: "链接博主", href: "https://www.douyin.com/user/SEC_BLOB" }));
-  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "blob:https://www.douyin.com/7d9f-1" }, holder)]);
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "blob:https://www.douyin.com/7d9f-1" })]);
+  ctx.setUserLinks([{ text: "链接博主", href: "https://www.douyin.com/user/SEC_BLOB", rect: { left: 20, top: 600, width: 120, height: 24 } }]);
   ctx.tick();
   ctx.blockViaMenu();
   ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_BLOB", nick: "链接博主" }]), "blob 播放源时按页面链接认出作者，不被地址索引误判");
 }
 
-// 4. 预加载的下一条也在播：取视口里占面积最大的那个视频
+// 3.2 头像那种 <a><img></a> 没有文字，昵称从 alt / 接口元数据里补，sec_uid 照样拿得到
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
-  const holder = el({ text: "" });
-  holder.appendChild(el({ text: "在播的这条", href: "https://www.douyin.com/user/SEC_ON" }));
-  ctx.setVideos([
-    ctx.mkVideo({ vidKey: "", src: "" }, null), // DOM 里排在前面的预加载卡片，视口外
-    ctx.mkVideo({ vidKey: "", src: "" }, holder),
-  ]);
-  ctx.setVideos([
-    Object.assign(ctx.mkVideo({ vidKey: "", src: "" }, null), { getBoundingClientRect: () => ({ left: 0, top: -800, right: 400, bottom: -100 }) }),
-    ctx.mkVideo({ vidKey: "", src: "" }, holder),
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" })]);
+  ctx.setUserLinks([
+    { href: "https://www.douyin.com/user/SEC_AVATAR", rect: { left: 20, top: 620, width: 44, height: 44 }, img: { _img: true, alt: "头像博主" } },
   ]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(ctx.syncData.blocked.some((b) => b.nick === "在播的这条"), "选中的是视口里在播的那条而不是预加载卡片");
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_AVATAR", nick: "头像博主" }]), "无文字头像链接取 img.alt 当昵称");
+
+  const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx2.feed([{ id: "V7", desc: "d", nick: "元数据昵称", sec: "SEC_META_ONLY", ct: 1, live: 0 }]);
+  ctx2.setVideos([ctx2.mkVideo({ vidKey: "NOPE", src: "" })]);
+  ctx2.setUserLinks([{ href: "https://www.douyin.com/user/SEC_META_ONLY", rect: { left: 20, top: 620, width: 44, height: 44 } }]);
+  ctx2.tick();
+  ctx2.blockViaMenu();
+  ok(JSON.stringify(ctx2.syncData.blocked) === JSON.stringify([{ sec: "SEC_META_ONLY", nick: "元数据昵称" }]), "链接无文字时按 sec_uid 回查接口昵称");
+}
+
+// 3.3 两个不同作者挤在同一段距离里：认不准就不写，绝不拉错人
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" })]);
+  ctx.setUserLinks([
+    { text: "甲博主", href: "https://www.douyin.com/user/SEC_X", rect: { left: 20, top: 600, width: 120, height: 24 } },
+    { text: "乙博主", href: "https://www.douyin.com/user/SEC_Y", rect: { left: 150, top: 600, width: 120, height: 24 } },
+  ]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(ctx.syncData.blocked.length === 0, "同距歧义时不写黑名单");
+  const diag = ctx.toasts.find((t) => t.includes("没认出手上这条的作者"));
+  ok(/同距/.test(diag), `诊断里说明是歧义：${diag}`);
+}
+
+// 3.4 压在视频画面上的链接优先于只是靠近的；都没压住时要求明显更近才算数
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" })]);
+  ctx.setUserLinks([
+    { text: "隔壁卡片", href: "https://www.douyin.com/user/SEC_FAR", rect: { left: 20, top: 760, width: 120, height: 24 } },
+    { text: "本条作者", href: "https://www.douyin.com/user/SEC_OVER", rect: { left: 20, top: 600, width: 120, height: 24 } },
+  ]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_OVER", nick: "本条作者" }]), "压住画面的作者链接胜出，不被相邻卡片抢走");
+
+  const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx2.setVideos([ctx2.mkVideo({ vidKey: "", src: "" })]);
+  ctx2.setUserLinks([
+    { text: "甲", href: "https://www.douyin.com/user/SEC_G60", rect: { left: 20, top: 760, width: 120, height: 24 } },
+    { text: "乙", href: "https://www.douyin.com/user/SEC_G100", rect: { left: 20, top: 800, width: 120, height: 24 } },
+  ]);
+  ctx2.tick();
+  ctx2.blockViaMenu();
+  ok(ctx2.syncData.blocked.length === 0, "两条都没压住画面且距离接近时判为认不准");
+}
+
+// 4. 预加载的下一条也在播：取视口里占面积最大的那个视频，作者链接按它就近取
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.setUserLinks([
+    { text: "预加载的这条", href: "https://www.douyin.com/user/SEC_OFF", rect: { left: 100, top: -700, width: 120, height: 24 } },
+    { text: "在播的这条", href: "https://www.douyin.com/user/SEC_ON", rect: { left: 100, top: 400, width: 120, height: 24 } },
+  ]);
+  ctx.setVideos([
+    ctx.mkVideo({ vidKey: "", src: "" }, null), // DOM 里排在前面的预加载卡片，视口外
+    ctx.mkVideo({ vidKey: "", src: "" }),
+  ]);
+  ctx.setVideos([
+    Object.assign(ctx.mkVideo({ vidKey: "", src: "" }, null), { getBoundingClientRect: () => ({ left: 0, top: -800, right: 400, bottom: -100, width: 400, height: 700 }) }),
+    ctx.mkVideo({ vidKey: "", src: "" }),
+  ]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_ON", nick: "在播的这条" }]), "选中的是视口里在播的那条而不是预加载卡片");
+}
+
+// 4.1 地址末两段对不上（CDN 路径深度不同）时，退一步只认最后一段，且要求全页唯一
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.feed([
+    { id: "V88", desc: "d", nick: "尾段博主", sec: "SEC_TAIL", ct: 1, live: 0, url: "https://v26-web.douyin.com/aaa/video/tos-cn-p-0015/abcdef0123456789?a=1" },
+    { id: "V89", desc: "d", nick: "另一条", sec: "SEC_OTHER", ct: 1, live: 0, url: "https://v26-web.douyin.com/bbb/video/tos-cn-p-0015/zzz999888777666?a=1" },
+  ]);
+  ctx.setVideos([ctx.mkVideo({ vidKey: "NOPE", src: "https://v95-web.douyin.com/deeper/path/prefix/abcdef0123456789?sign=x" })]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_TAIL", nick: "尾段博主" }]), "两段路径不同也能按末段唯一尾缀对上");
+
+  const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx2.feed([
+    { id: "VA", desc: "d", nick: "甲", sec: "SEC_A1", ct: 1, live: 0, url: "https://x.com/a/playlist-shared" },
+    { id: "VB", desc: "d", nick: "乙", sec: "SEC_B1", ct: 1, live: 0, url: "https://y.com/b/playlist-shared" },
+  ]);
+  ctx2.setVideos([ctx2.mkVideo({ vidKey: "NOPE", src: "https://z.com/c/playlist-shared" })]);
+  ctx2.setUserLinks([{ text: "页面博主", href: "https://www.douyin.com/user/SEC_PAGE", rect: { left: 20, top: 600, width: 120, height: 24 } }]);
+  ctx2.tick();
+  ctx2.blockViaMenu();
+  ok(ctx2.syncData.blocked[0] && ctx2.syncData.blocked[0].sec === "SEC_PAGE", "末段撞名时作废地址索引，改走页面链接");
 }
 
 // 5. 三条路都认不出：提示里带上各环节计数，并写进诊断
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
-  ctx.setVideos([ctx.mkVideo({ vidKey: "" }, null)]);
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" }, null)]);
   ctx.setUserLinks([]);
   ctx.tick();
   ctx.blockViaMenu();
   const diag = ctx.toasts.find((t) => t.includes("没认出手上这条的作者"));
   ok(!!diag, "认不出作者时给出提示");
-  ok(/元数据0/.test(diag) && /vid键无/.test(diag) && /作者链接0/.test(diag), `提示里含各环节计数：${diag}`);
+  ok(/元数据0/.test(diag) && /vid=无/.test(diag) && /作者链接0/.test(diag), `提示里含各环节计数：${diag}`);
+  ok(/附近无作者链接/.test(diag), `提示里说明页面链接这条为什么断：${diag}`);
   ok(typeof ctx.localData.authorDbg === "string" && ctx.localData.authorDbg.includes("元数据0"), "诊断写入 storage.local 供弹窗展示");
   ok(ctx.syncData.blocked.length === 0, "认不出作者时不写 blocked");
 }
