@@ -91,6 +91,7 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
   if (feedMirror) lsStore["dyfilter-feed"] = JSON.stringify(feedMirror);
   const toasts = [];
   const bodyEvents = [];
+  const docEvents = [];
   const handlers = { message: [], play: [], contextmenu: [] };
   const msgHandlers = [];
   const changedHandlers = [];
@@ -146,7 +147,7 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
     documentElement: Object.assign(root, { dataset: { dyMainHook: "1", dyPatchMode: "proto" } }),
     body,
     addEventListener: (t, fn) => (handlers[t] || handlers.message).push(fn),
-    dispatchEvent: () => {},
+    dispatchEvent: (evt) => docEvents.push(evt && evt.type),
     elementsFromPoint: () => pointStack,
     querySelectorAll: (sel) => {
       if (sel === "video") return videos;
@@ -167,9 +168,20 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
     },
   };
 
+  // 账号级拉黑的接口回包由用例控制：默认第一个端点就成功
+  const fetchCalls = [];
+  let fetchReplies = [{ status: 200, body: JSON.stringify({ status_code: 0 }) }];
+
+  const fetchStub = async (url, opts) => {
+    fetchCalls.push({ url, opts });
+    const r = fetchReplies[Math.min(fetchCalls.length - 1, fetchReplies.length - 1)];
+    if (r instanceof Error) throw r;
+    return { ok: r.status < 400, status: r.status, text: async () => r.body };
+  };
+
   new Function(
     "window", "document", "chrome", "localStorage", "setInterval", "clearInterval",
-    "setTimeout", "clearTimeout", "HTMLVideoElement", "KeyboardEvent", "MouseEvent",
+    "setTimeout", "clearTimeout", "HTMLVideoElement", "KeyboardEvent", "MouseEvent", "fetch",
     SRC
   )(
     windowStub,
@@ -187,11 +199,27 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
     },
     () => {},
     function HTMLVideoElement() {},
-    class KeyboardEvent {},
-    class MouseEvent {}
+    class KeyboardEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        Object.assign(this, init);
+      }
+    },
+    class MouseEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        Object.assign(this, init);
+      }
+    },
+    fetchStub
   );
 
   return {
+    fetchCalls,
+    docEvents,
+    setFetch: (...replies) => {
+      fetchReplies = replies;
+    },
     syncData,
     localData,
     lsStore,
@@ -265,6 +293,10 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
 
 let pass = 0;
 let fail = 0;
+// 拉黑改成先等接口回包，断言前要放掉微任务/定时器
+const flush = () => new Promise((r) => setTimeout(r, 0));
+// 认出来的作者，最终提交给抖音拉黑接口的账号 ID
+const sentSec = (ctx) => (ctx.fetchCalls[0] && /[?&]sec_user_id=([^&]*)/.exec(ctx.fetchCalls[0].url) || [])[1] || "";
 const ok = (cond, label) => {
   if (cond) pass += 1;
   else {
@@ -273,7 +305,7 @@ const ok = (cond, label) => {
   }
 };
 
-// 1. 接口元数据认得出作者：写进独立的 blocked 列表，不碰关键字
+// 1. 认出作者 + 抖音拉黑接口成功：走账号级，本地不留条目
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: ["广告"], blocked: [] });
   ctx.feed([{ id: "V1", desc: "d", nick: "某博主", sec: "SEC_A", ct: Math.floor(Date.now() / 1000), live: 0 }]);
@@ -283,12 +315,43 @@ const ok = (cond, label) => {
   ctx.fireMutation(menu);
   ok(!!ctx.injectedRow(menu), `菜单里补进了「${LABEL}」`);
   ctx.clickRow(menu);
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_A", nick: "某博主" }]), "拉黑写入 blocked（含 sec_uid）");
+  await flush();
+  ok(ctx.fetchCalls.length === 1 && /\/aweme\/v1\/web\/relationship\/block\//.test(ctx.fetchCalls[0].url), "按 sec_user_id 调抖音拉黑接口");
+  ok(ctx.fetchCalls[0].url.includes("sec_user_id=SEC_A"), "请求里带的是作者账号 ID");
+  ok(ctx.fetchCalls[0].opts.method === "POST" && ctx.fetchCalls[0].opts.credentials === "include", "POST 且带上登录 cookie");
+  ok((ctx.syncData.blocked || []).length === 0, "账号级成功后本地黑名单不留条目");
   ok(JSON.stringify(ctx.syncData.keywords) === JSON.stringify(["广告"]), "关键字列表没被污染");
-  ok(ctx.toasts.some((t) => t.includes("已拉黑：某博主")), "给出拉黑提示");
-  ok(ctx.toasts.some((t) => t.includes("已过滤：已拉黑「某博主」")), "当前视频立刻被跳过");
+  ok(ctx.toasts.some((t) => t.includes("已在抖音账号里拉黑：某博主")), "提示说明是账号级拉黑");
+  ok(ctx.docEvents.includes("keydown"), "当前这条立刻按键跳过");
   ctx.fireMutation(menu);
   ok(menu.children.filter((c) => c.textContent === LABEL).length === 1, "同一菜单不重复注入");
+}
+
+// 1b. 接口没通过：三个候选端点都试，留本地临时拦截，并把真实回包写进诊断
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.setFetch({ status: 200, body: JSON.stringify({ status_code: 8, status_msg: "invalid a_bogus" }) });
+  ctx.feed([{ id: "V1", desc: "d", nick: "某博主", sec: "SEC_A", ct: 1, live: 0 }]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  await flush();
+  ok(ctx.fetchCalls.length === 3, `候选端点逐个试到第 ${ctx.fetchCalls.length} 个`);
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_A", nick: "某博主" }]), "接口没通过时留本地临时拦截");
+  ok(/invalid a_bogus/.test(ctx.localData.blockDbg || ""), `回包原样进诊断：${ctx.localData.blockDbg}`);
+  ok(/code8/.test(ctx.localData.blockDbg || ""), "诊断里带 status_code");
+  ok(ctx.toasts.some((t) => t.includes("抖音拉黑接口没通过")), "失败有明确提示");
+}
+
+// 1c. 只认到昵称、没有 sec_uid：不发请求（抖音接口按账号 ID 认人）
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.feed([{ id: "V1", desc: "d", nick: "无ID博主", sec: "", ct: 1, live: 0 }]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  await flush();
+  ok(ctx.fetchCalls.length === 0, "没有 sec_uid 时不发拉黑请求");
+  ok(ctx.syncData.blocked.length === 1, "退化为本地拦截");
+  ok(ctx.toasts.some((t) => t.includes("没拿到账号 ID")), "说明为什么没走成账号级");
 }
 
 // 2. data-e2e-vid 没了：靠播放地址把 video 对回接口卡片
@@ -298,7 +361,8 @@ const ok = (cond, label) => {
   ctx.feed([{ id: "V9", desc: "d", nick: "地址博主", sec: "SEC_URL", ct: 1, live: 0, url: "https://v26-web.douyin.com/aaa/video/tos-cn-p-0015/abc123?a=1" }]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_URL", nick: "地址博主" }]), "无 vid 键时按播放地址认出作者");
+  await flush();
+  ok(sentSec(ctx) === "SEC_URL", "无 vid 键时按播放地址认出作者");
 }
 
 // 3. 接口元数据完全对不上：退回页面上离在播视频最近的作者链接
@@ -308,7 +372,9 @@ const ok = (cond, label) => {
   ctx.setUserLinks([{ text: "链接博主", href: "https://www.douyin.com/user/MS4wLjABAAAAx?from_nav=1", rect: { left: 20, top: 600, width: 120, height: 24 } }]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "MS4wLjABAAAAx", nick: "链接博主" }]), "从页面链接认出 sec_uid+昵称");
+  await flush();
+  ok(sentSec(ctx) === "MS4wLjABAAAAx", "从页面链接认出 sec_uid");
+  ok(ctx.toasts.some((t) => t.includes("拉黑：链接博主")), "昵称用于展示");
 }
 
 // 3.1 播放器用 blob（MSE）时不硬套地址索引，退回页面链接
@@ -319,7 +385,8 @@ const ok = (cond, label) => {
   ctx.setUserLinks([{ text: "链接博主", href: "https://www.douyin.com/user/SEC_BLOB", rect: { left: 20, top: 600, width: 120, height: 24 } }]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_BLOB", nick: "链接博主" }]), "blob 播放源时按页面链接认出作者，不被地址索引误判");
+  await flush();
+  ok(sentSec(ctx) === "SEC_BLOB", "blob 播放源时按页面链接认出作者，不被地址索引误判");
 }
 
 // 3.2 头像那种 <a><img></a> 没有文字，昵称从 alt / 接口元数据里补，sec_uid 照样拿得到
@@ -331,7 +398,9 @@ const ok = (cond, label) => {
   ]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_AVATAR", nick: "头像博主" }]), "无文字头像链接取 img.alt 当昵称");
+  await flush();
+  ok(sentSec(ctx) === "SEC_AVATAR", "无文字头像链接取 img.alt 当昵称");
+  ok(ctx.toasts.some((t) => t.includes("拉黑：头像博主")), "alt 里的昵称用于展示");
 
   const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx2.feed([{ id: "V7", desc: "d", nick: "元数据昵称", sec: "SEC_META_ONLY", ct: 1, live: 0 }]);
@@ -339,7 +408,9 @@ const ok = (cond, label) => {
   ctx2.setUserLinks([{ href: "https://www.douyin.com/user/SEC_META_ONLY", rect: { left: 20, top: 620, width: 44, height: 44 } }]);
   ctx2.tick();
   ctx2.blockViaMenu();
-  ok(JSON.stringify(ctx2.syncData.blocked) === JSON.stringify([{ sec: "SEC_META_ONLY", nick: "元数据昵称" }]), "链接无文字时按 sec_uid 回查接口昵称");
+  await flush();
+  ok(sentSec(ctx2) === "SEC_META_ONLY", "链接无文字时按 sec_uid 回查接口昵称");
+  ok(ctx2.toasts.some((t) => t.includes("拉黑：元数据昵称")), "昵称从接口元数据补上");
 }
 
 // 3.3 同一张卡片里两条不同作者的链接同样近：认不准就不写，绝不拉错人
@@ -368,7 +439,8 @@ const ok = (cond, label) => {
   ]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_OVER", nick: "本条作者" }]), "压住画面的作者链接胜出，不被相邻卡片抢走");
+  await flush();
+  ok(sentSec(ctx) === "SEC_OVER", "压住画面的作者链接胜出，不被相邻卡片抢走");
 
   const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx2.setVideos([ctx2.mkVideo({ vidKey: "", src: "" })]);
@@ -392,7 +464,8 @@ const ok = (cond, label) => {
   ]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_REAL", nick: "本条作者" }]), "排除 /user/self，认卡片里的作者");
+  await flush();
+  ok(sentSec(ctx) === "SEC_REAL", "排除 /user/self，认卡片里的作者");
 }
 
 // 3.6 结构归属优先于像素距离：不在同一张卡片里的链接再近也不认
@@ -406,7 +479,8 @@ const ok = (cond, label) => {
   ]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_INSIDE", nick: "同卡片作者" }]), "按共同祖先判定归属，取同卡片那条");
+  await flush();
+  ok(sentSec(ctx) === "SEC_INSIDE", "按共同祖先判定归属，取同卡片那条");
 }
 
 // 3.7 首页响应早于 content 的监听器：从 hook 落在 localStorage 的镜像里补读元数据
@@ -416,13 +490,15 @@ const ok = (cond, label) => {
   });
   ctx.setVideos([ctx.mkVideo({ vidKey: "V50", src: "" })]);
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_MIRROR", nick: "镜像博主" }]), "没收到 postMessage 也能靠镜像认出作者");
+  await flush();
+  ok(sentSec(ctx) === "SEC_MIRROR", "没收到 postMessage 也能靠镜像认出作者");
 
   const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx2.seedFeedMirror([{ id: "V51", desc: "d", nick: "后落镜像的博主", sec: "SEC_LATE", ct: 1, live: 0, url: "https://x.com/a/b/uniq-tail-99887766" }]);
   ctx2.setVideos([ctx2.mkVideo({ vidKey: "V51", src: "" })]);
   ctx2.blockViaMenu();
-  ok(JSON.stringify(ctx2.syncData.blocked) === JSON.stringify([{ sec: "SEC_LATE", nick: "后落镜像的博主" }]), "拉黑前再回读一次镜像，拿到刚写入的那页");
+  await flush();
+  ok(sentSec(ctx2) === "SEC_LATE", "拉黑前再回读一次镜像，拿到刚写入的那页");
 }
 
 // 4. 预加载的下一条也在播：取视口里占面积最大的那个视频，作者链接按它就近取
@@ -442,7 +518,8 @@ const ok = (cond, label) => {
   ]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_ON", nick: "在播的这条" }]), "选中的是视口里在播的那条而不是预加载卡片");
+  await flush();
+  ok(sentSec(ctx) === "SEC_ON", "选中的是视口里在播的那条而不是预加载卡片");
 }
 
 // 4.1 地址末两段对不上（CDN 路径深度不同）时，退一步只认最后一段，且要求全页唯一
@@ -455,7 +532,8 @@ const ok = (cond, label) => {
   ctx.setVideos([ctx.mkVideo({ vidKey: "NOPE", src: "https://v95-web.douyin.com/deeper/path/prefix/abcdef0123456789?sign=x" })]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_TAIL", nick: "尾段博主" }]), "两段路径不同也能按末段唯一尾缀对上");
+  await flush();
+  ok(sentSec(ctx) === "SEC_TAIL", "两段路径不同也能按末段唯一尾缀对上");
 
   const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx2.feed([
@@ -466,7 +544,8 @@ const ok = (cond, label) => {
   ctx2.setUserLinks([{ text: "页面博主", href: "https://www.douyin.com/user/SEC_PAGE", rect: { left: 20, top: 600, width: 120, height: 24 } }]);
   ctx2.tick();
   ctx2.blockViaMenu();
-  ok(ctx2.syncData.blocked[0] && ctx2.syncData.blocked[0].sec === "SEC_PAGE", "末段撞名时作废地址索引，改走页面链接");
+  await flush();
+  ok(sentSec(ctx2) === "SEC_PAGE", "末段撞名时作废地址索引，改走页面链接");
 }
 
 // 5. 三条路都认不出：提示里带上各环节计数，并写进诊断
@@ -484,14 +563,25 @@ const ok = (cond, label) => {
   ok(ctx.syncData.blocked.length === 0, "认不出作者时不写 blocked");
 }
 
-// 6. 重复拉黑去重（按 sec_uid）
+// 6. 本地条目与账号级的关系：成功就清掉之前那条临时拦截，失败则不重复追加
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [{ sec: "SEC_A", nick: "旧名字" }] });
   ctx.feed([{ id: "V1", desc: "d", nick: "新名字", sec: "SEC_A", ct: 1, live: 0 }]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(ctx.syncData.blocked.length === 1, "同一 sec_uid 不重复拉黑");
-  ok(ctx.toasts.some((t) => t.includes("已经拉黑了")), "重复拉黑给出提示");
+  await flush();
+  ok(sentSec(ctx) === "SEC_A", "接口按认出来的 sec_uid 提交，不受本地旧昵称影响");
+  ok((ctx.syncData.blocked || []).length === 0, "账号级成功后清掉本地那条（含改名前的旧条目）");
+
+  const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [{ sec: "SEC_A", nick: "旧名字" }] });
+  ctx2.setFetch({ status: 403, body: "Forbidden" });
+  ctx2.feed([{ id: "V1", desc: "d", nick: "新名字", sec: "SEC_A", ct: 1, live: 0 }]);
+  ctx2.tick();
+  ctx2.blockViaMenu();
+  await flush();
+  ok(ctx2.syncData.blocked.length === 1, "接口失败时本地那条不重复追加");
+  ok(ctx2.syncData.blocked[0].nick === "旧名字", "保留原条目不动");
+  ok(/403/.test(ctx2.localData.blockDbg || ""), `HTTP 状态也进诊断：${ctx2.localData.blockDbg}`);
 }
 
 // 7. 登录态：只在顶栏有「登录」按钮时才当作未登录（判不准就给入口）
@@ -567,9 +657,12 @@ const ok = (cond, label) => {
 // 11. 拉黑名单随配置广播给 hook.js
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  // 接口没通过时才留本地条目，这条本地条目才是要广播给 hook.js 的
+  ctx.setFetch({ status: 200, body: JSON.stringify({ status_code: 8, status_msg: "invalid a_bogus" }) });
   ctx.feed([{ id: "V1", desc: "d", nick: "广播博主", sec: "SEC_B", ct: 1, live: 0 }]);
   ctx.tick();
   ctx.blockViaMenu();
+  await flush();
   const cfg = JSON.parse(ctx.lsStore["dyfilter-cfg"]);
   ok(cfg.blocked && cfg.blocked[0] && cfg.blocked[0].sec === "SEC_B", "blocked 已广播到 localStorage 供 hook.js 读取");
 }

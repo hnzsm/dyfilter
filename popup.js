@@ -87,6 +87,8 @@ const renderStats = () => {
       loggedIn: 1,
       authorDbg: "",
       authorDbgTs: 0,
+      blockDbg: "",
+      blockDbgTs: 0,
     },
     (st) => {
       if (chrome.runtime.lastError) return;
@@ -101,6 +103,9 @@ const renderStats = () => {
       ];
       if (st.authorDbg && now - st.authorDbgTs < 300000) {
         lines.push(`上次拉黑没认出作者：${st.authorDbg}（把这行发我）`);
+      }
+      if (st.blockDbg && now - st.blockDbgTs < 300000) {
+        lines.push(`上次拉黑接口没通过：${st.blockDbg}（把这行发我）`);
       }
       if (ok(st.contentTs, 15000) && !st.loggedIn) {
         lines.push("顶栏还有「登录」按钮：视为未登录，右键菜单里不给「拉黑该作者」。");

@@ -460,21 +460,14 @@
   }
 
   // 拉黑走独立的 blocked 列表（按 sec_uid 认人），不再往关键字里塞昵称。
-  function blockCurrentAuthor() {
-    readFeedMirror();
-    const who = currentAuthor();
-    if (!who) {
-      const diag = authorDiag();
-      if (ctxOk()) chrome.storage.local.set({ authorDbg: diag, authorDbgTs: Date.now() });
-      toast(`没认出手上这条的作者：${diag}`, 6000);
-      return;
-    }
+  // 往本地黑名单写一条（账号级拉黑没做成时的临时拦截），按 sec_uid / 昵称去重
+  function writeLocal(who, done) {
     chrome.storage.sync.get(LEGACY_DEFAULTS, (stored) => {
       if (!ctxOk() || chrome.runtime.lastError) return;
       const list = Array.isArray(stored.blocked) ? stored.blocked.filter((b) => b && (b.sec || b.nick)) : [];
-      const lower = who.nick.toLowerCase();
+      const lower = String(who.nick || "").toLowerCase();
       if (list.some((b) => (who.sec && b.sec === who.sec) || String(b.nick || "").toLowerCase() === lower)) {
-        toast(`「${who.nick}」已经拉黑了`, 2500);
+        done && done();
         return;
       }
       chrome.storage.sync.set(
@@ -486,9 +479,111 @@
         },
         () => {
           if (!ctxOk() || chrome.runtime.lastError) return;
-          toast(`已拉黑：${who.nick}`, 2500);
+          done && done();
         }
       );
+    });
+  }
+
+  // 账号级拉黑成功后本地那条就作废：抖音的黑名单才是唯一真相，解除也去抖音设置里解
+  function removeLocal(sec, nick) {
+    chrome.storage.sync.get(LEGACY_DEFAULTS, (stored) => {
+      if (!ctxOk() || chrome.runtime.lastError) return;
+      const list = Array.isArray(stored.blocked) ? stored.blocked.filter((b) => b && (b.sec || b.nick)) : [];
+      const lower = String(nick || "").toLowerCase();
+      const next = list.filter((b) => !((sec && b.sec === sec) || (lower && String(b.nick || "").toLowerCase() === lower)));
+      if (next.length === list.length) return;
+      chrome.storage.sync.set({
+        enabled: stored.enabled !== false,
+        hours: normalizeHours(stored),
+        keywords: Array.isArray(stored.keywords) ? stored.keywords : [],
+        blocked: next,
+      });
+    });
+  }
+
+  // 抖音网页版的关系接口端点没法离线核实（本站点访问外网被拦），按最可能的几个依次试，
+  // 并把每个的真实 HTTP 状态和 status_code 回传——失败时要能一眼看出是"端点不对"还是"签名/风控没过"。
+  const BLOCK_ENDPOINTS = [
+    "/aweme/v1/web/relationship/block/",
+    "/aweme/v1/web/user/block/",
+    "/aweme/v1/web/relationship/black/add/",
+  ];
+  const COMMON_QUERY =
+    "device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=1&cookie_enabled=true&platform=Web%20PC";
+
+  const cookieOf = (name) => {
+    const m = new RegExp("(?:^|; )" + name + "=([^;]*)").exec(document.cookie || "");
+    if (!m) return "";
+    try {
+      return decodeURIComponent(m[1]);
+    } catch (e) {
+      return m[1];
+    }
+  };
+
+  async function blockOnDouyin(sec) {
+    const attempts = [];
+    const msToken = cookieOf("msToken");
+    const body = `sec_user_id=${encodeURIComponent(sec)}`;
+    for (const path of BLOCK_ENDPOINTS) {
+      const q = `${COMMON_QUERY}&sec_user_id=${encodeURIComponent(sec)}${msToken ? `&msToken=${encodeURIComponent(msToken)}` : ""}`;
+      try {
+        const res = await fetch(`${path}?${q}`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        const text = await res.text();
+        let j = null;
+        try {
+          j = JSON.parse(text);
+        } catch (e) {}
+        const code = j && (j.status_code === undefined ? j.error_code : j.status_code);
+        attempts.push(
+          `${path.replace("/aweme/v1/web/", "")} → ${res.status}${code === undefined ? "" : "/code" + code}${
+            j && j.status_msg ? `(${j.status_msg})` : text && code === undefined ? `(${text.slice(0, 24)})` : ""
+          }`
+        );
+        if (res.ok && code === 0) return { ok: true, via: path, attempts };
+      } catch (e) {
+        attempts.push(`${path.replace("/aweme/v1/web/", "")} → 请求异常(${(e && e.name) || "?"})`);
+      }
+    }
+    return { ok: false, attempts };
+  }
+
+  function blockCurrentAuthor() {
+    readFeedMirror();
+    const who = currentAuthor();
+    if (!who) {
+      const diag = authorDiag();
+      if (ctxOk()) chrome.storage.local.set({ authorDbg: diag, authorDbgTs: Date.now() });
+      toast(`没认出手上这条的作者：${diag}`, 6000);
+      return;
+    }
+    // 抖音接口按账号 ID 认人，只拿到昵称就没法提交账号级拉黑
+    if (!who.sec) {
+      writeLocal(who, () => {
+        skipToNext();
+        toast(`只认到昵称、没拿到账号 ID(sec_uid)，先在插件里拦下：${who.nick}`, 5000);
+      });
+      return;
+    }
+    toast(`正在向抖音提交拉黑：${who.nick}…`, 2000);
+    blockOnDouyin(who.sec).then((r) => {
+      if (r.ok) {
+        removeLocal(who.sec, who.nick);
+        skipToNext();
+        toast(`已在抖音账号里拉黑：${who.nick}（解除：抖音 设置→隐私设置→黑名单管理）`, 4500);
+        return;
+      }
+      writeLocal(who, () => {
+        skipToNext();
+        if (ctxOk()) chrome.storage.local.set({ blockDbg: r.attempts.join("　"), blockDbgTs: Date.now() });
+        toast(`抖音拉黑接口没通过，先在插件里拦下：${who.nick}。回包 ${r.attempts.join(" | ")}`, 10000);
+      });
     });
   }
 

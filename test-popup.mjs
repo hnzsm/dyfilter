@@ -130,6 +130,19 @@ localData.authorDbgTs = Date.now() - 6 * 60 * 1000;
 timers[0]();
 if (els.stats.textContent.includes("没认出作者")) throw new Error("过期诊断仍在显示");
 
+// 场景：账号级拉黑接口没通过，三个端点的真实回包要原样出现在弹窗里
+localData.blockDbg = "relationship/block/ → 200/code8(invalid a_bogus)　user/block/ → 404　black/add/ → 404";
+localData.blockDbgTs = Date.now();
+timers[0]();
+const blockLine = els.stats.textContent.split("\n").find((l) => l.includes("拉黑接口没通过"));
+if (!blockLine) throw new Error("接口诊断行没进弹窗");
+if (!blockLine.includes("invalid a_bogus")) throw new Error("接口诊断行被截断: " + blockLine);
+console.log("[stats/接口诊断]\n" + els.stats.textContent);
+
+localData.blockDbgTs = Date.now() - 6 * 60 * 1000;
+timers[0]();
+if (els.stats.textContent.includes("拉黑接口没通过")) throw new Error("过期接口诊断仍在显示");
+
 // 保存按钮：只写自己的字段，不能把 blocked 冲掉
 localData.loggedIn = 1;
 els.enabled.checked = true;

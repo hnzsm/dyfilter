@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "抖音推荐流过滤器",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "按发布日期、关键字和拉黑博主自动跳过抖音网页版首页推荐流的内容",
   "permissions": ["storage", "contextMenus"],
   "background": {
