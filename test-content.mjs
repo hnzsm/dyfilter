@@ -295,8 +295,8 @@ let pass = 0;
 let fail = 0;
 // 拉黑改成先等接口回包，断言前要放掉微任务/定时器
 const flush = () => new Promise((r) => setTimeout(r, 0));
-// 认出来的作者，最终提交给抖音拉黑接口的账号 ID
-const sentSec = (ctx) => (ctx.fetchCalls[0] && /[?&]sec_user_id=([^&]*)/.exec(ctx.fetchCalls[0].url) || [])[1] || "";
+// 认出来的作者，最终提交给抖音拉黑接口的账号 ID（抓包实测：sec_user_id 在 POST body 里，不在 query 上）
+const sentSec = (ctx) => (ctx.fetchCalls[0] && /(?:^|&)sec_user_id=([^&]*)/.exec(ctx.fetchCalls[0].opts.body || "") || [])[1] || "";
 const ok = (cond, label) => {
   if (cond) pass += 1;
   else {
@@ -316,8 +316,9 @@ const ok = (cond, label) => {
   ok(!!ctx.injectedRow(menu), `菜单里补进了「${LABEL}」`);
   ctx.clickRow(menu);
   await flush();
-  ok(ctx.fetchCalls.length === 1 && /\/aweme\/v1\/web\/relationship\/block\//.test(ctx.fetchCalls[0].url), "按 sec_user_id 调抖音拉黑接口");
-  ok(ctx.fetchCalls[0].url.includes("sec_user_id=SEC_A"), "请求里带的是作者账号 ID");
+  ok(ctx.fetchCalls.length === 1 && /\/aweme\/v1\/web\/user\/block\//.test(ctx.fetchCalls[0].url), "调抖音实测的拉黑端点 user/block");
+  ok(sentSec(ctx) === "SEC_A", `sec_user_id 放在 POST body 里：${ctx.fetchCalls[0] && ctx.fetchCalls[0].opts.body}`);
+  ok(/block_type=0/.test(ctx.fetchCalls[0].opts.body) && /source=0/.test(ctx.fetchCalls[0].opts.body), "带上实测的 block_type/source 字段");
   ok(ctx.fetchCalls[0].opts.method === "POST" && ctx.fetchCalls[0].opts.credentials === "include", "POST 且带上登录 cookie");
   ok((ctx.syncData.blocked || []).length === 0, "账号级成功后本地黑名单不留条目");
   ok(JSON.stringify(ctx.syncData.keywords) === JSON.stringify(["广告"]), "关键字列表没被污染");
@@ -327,7 +328,7 @@ const ok = (cond, label) => {
   ok(menu.children.filter((c) => c.textContent === LABEL).length === 1, "同一菜单不重复注入");
 }
 
-// 1b. 接口没通过：三个候选端点都试，留本地临时拦截，并把真实回包写进诊断
+// 1b. 接口没通过：留本地临时拦截，并把真实回包写进诊断
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   ctx.setFetch({ status: 200, body: JSON.stringify({ status_code: 8, status_msg: "invalid a_bogus" }) });
@@ -335,7 +336,7 @@ const ok = (cond, label) => {
   ctx.tick();
   ctx.blockViaMenu();
   await flush();
-  ok(ctx.fetchCalls.length === 3, `候选端点逐个试到第 ${ctx.fetchCalls.length} 个`);
+  ok(ctx.fetchCalls.length === 1, `端点已实测确定，只发一次：${ctx.fetchCalls.length}`);
   ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_A", nick: "某博主" }]), "接口没通过时留本地临时拦截");
   ok(/invalid a_bogus/.test(ctx.localData.blockDbg || ""), `回包原样进诊断：${ctx.localData.blockDbg}`);
   ok(/code8/.test(ctx.localData.blockDbg || ""), "诊断里带 status_code");

@@ -131,7 +131,7 @@ timers[0]();
 if (els.stats.textContent.includes("没认出作者")) throw new Error("过期诊断仍在显示");
 
 // 场景：账号级拉黑接口没通过，三个端点的真实回包要原样出现在弹窗里
-localData.blockDbg = "relationship/block/ → 200/code8(invalid a_bogus)　user/block/ → 404　black/add/ → 404";
+localData.blockDbg = "403/code8(invalid a_bogus)";
 localData.blockDbgTs = Date.now();
 timers[0]();
 const blockLine = els.stats.textContent.split("\n").find((l) => l.includes("拉黑接口没通过"));

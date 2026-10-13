@@ -502,56 +502,38 @@
     });
   }
 
-  // 抖音网页版的关系接口端点没法离线核实（本站点访问外网被拦），按最可能的几个依次试，
-  // 并把每个的真实 HTTP 状态和 status_code 回传——失败时要能一眼看出是"端点不对"还是"签名/风控没过"。
-  const BLOCK_ENDPOINTS = [
-    "/aweme/v1/web/relationship/block/",
-    "/aweme/v1/web/user/block/",
-    "/aweme/v1/web/relationship/black/add/",
-  ];
-  const COMMON_QUERY =
-    "device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=1&cookie_enabled=true&platform=Web%20PC";
-
-  const cookieOf = (name) => {
-    const m = new RegExp("(?:^|; )" + name + "=([^;]*)").exec(document.cookie || "");
-    if (!m) return "";
-    try {
-      return decodeURIComponent(m[1]);
-    } catch (e) {
-      return m[1];
-    }
-  };
+  // 2026-10-13 实测抓包得到（登录态浏览器里手点一次「拉黑」）：
+  //   POST https://www.douyin.com/aweme/v1/web/user/block/
+  //   body: block_type=0&sec_user_id=<sec_uid>&source=0&user_id=<数字uid>
+  // 实测结论：a_bogus / msToken / fp / verifyFp 全部不是必需（去掉后仍 status_code:0），
+  // 数字 user_id 也可省略，只 sec_user_id 就够——接口元数据里我们本来就只稳定拿到 sec_uid。
+  const BLOCK_PATH = "/aweme/v1/web/user/block/";
+  const BLOCK_QUERY =
+    "device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=2&update_version_code=170400&version_code=170400&version_name=17.4.0&cookie_enabled=true&platform=PC";
 
   async function blockOnDouyin(sec) {
-    const attempts = [];
-    const msToken = cookieOf("msToken");
-    const body = `sec_user_id=${encodeURIComponent(sec)}`;
-    for (const path of BLOCK_ENDPOINTS) {
-      const q = `${COMMON_QUERY}&sec_user_id=${encodeURIComponent(sec)}${msToken ? `&msToken=${encodeURIComponent(msToken)}` : ""}`;
+    const body = `block_type=0&sec_user_id=${encodeURIComponent(sec)}&source=0`;
+    try {
+      const res = await fetch(`${BLOCK_PATH}?${BLOCK_QUERY}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      const text = await res.text();
+      let j = null;
       try {
-        const res = await fetch(`${path}?${q}`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body,
-        });
-        const text = await res.text();
-        let j = null;
-        try {
-          j = JSON.parse(text);
-        } catch (e) {}
-        const code = j && (j.status_code === undefined ? j.error_code : j.status_code);
-        attempts.push(
-          `${path.replace("/aweme/v1/web/", "")} → ${res.status}${code === undefined ? "" : "/code" + code}${
-            j && j.status_msg ? `(${j.status_msg})` : text && code === undefined ? `(${text.slice(0, 24)})` : ""
-          }`
-        );
-        if (res.ok && code === 0) return { ok: true, via: path, attempts };
-      } catch (e) {
-        attempts.push(`${path.replace("/aweme/v1/web/", "")} → 请求异常(${(e && e.name) || "?"})`);
-      }
+        j = JSON.parse(text);
+      } catch (e) {}
+      const code = j && (j.status_code === undefined ? j.error_code : j.status_code);
+      const detail = `${res.status}${code === undefined ? "" : "/code" + code}${
+        j && j.status_msg ? `(${j.status_msg})` : text && code === undefined ? `(${text.slice(0, 40)})` : ""
+      }`;
+      if (res.ok && code === 0) return { ok: true, via: BLOCK_PATH, detail };
+      return { ok: false, detail };
+    } catch (e) {
+      return { ok: false, detail: `请求异常(${(e && e.name) || "?"})` };
     }
-    return { ok: false, attempts };
   }
 
   function blockCurrentAuthor() {
@@ -581,8 +563,8 @@
       }
       writeLocal(who, () => {
         skipToNext();
-        if (ctxOk()) chrome.storage.local.set({ blockDbg: r.attempts.join("　"), blockDbgTs: Date.now() });
-        toast(`抖音拉黑接口没通过，先在插件里拦下：${who.nick}。回包 ${r.attempts.join(" | ")}`, 10000);
+        if (ctxOk()) chrome.storage.local.set({ blockDbg: r.detail, blockDbgTs: Date.now() });
+        toast(`抖音拉黑接口没通过，先在插件里拦下：${who.nick}。回包 ${r.detail}`, 10000);
       });
     });
   }
