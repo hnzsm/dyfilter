@@ -203,6 +203,42 @@
     toastTimer = setTimeout(() => (toastEl.style.display = "none"), ms);
   }
 
+  // 右键菜单「屏蔽这个博主」：把当前卡片作者昵称追加进关键字黑名单。
+  // 复用现有关键字通路 = 同一个博主的视频和直播都会被拦下，弹窗里也能直接看到/删除。
+  function blockCurrentAuthor() {
+    const vid = currentVid || findCurrentVid();
+    const meta = vid ? metas.get(vid) : null;
+    const nick = meta && meta.nick ? String(meta.nick).trim() : "";
+    if (!nick) {
+      toast("没识别出当前博主，等视频播起来再右键", 3000);
+      return;
+    }
+    chrome.storage.sync.get(LEGACY_DEFAULTS, (stored) => {
+      if (!ctxOk() || chrome.runtime.lastError) return;
+      const list = Array.isArray(stored.keywords) ? stored.keywords : [];
+      const lower = nick.toLowerCase();
+      if (list.some((k) => String(k).trim().toLowerCase() === lower)) {
+        toast(`「${nick}」已经在黑名单里`, 2500);
+        return;
+      }
+      chrome.storage.sync.set(
+        { enabled: stored.enabled !== false, hours: normalizeHours(stored), keywords: [...list, nick] },
+        () => {
+          if (!ctxOk() || chrome.runtime.lastError) return;
+          toast(`已屏蔽博主：${nick}`, 2500);
+        }
+      );
+    });
+  }
+
+  if (chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (!msg || msg.type !== "dyfilter-block-author") return;
+      blockCurrentAuthor();
+      sendResponse({ ok: true });
+    });
+  }
+
   setInterval(() => {
     const vid = findCurrentVid();
     if (!vid) return;
