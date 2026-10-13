@@ -84,10 +84,11 @@ const mkVideo = ({ vidKey = "V1", src = "", rect = { left: 0, top: 0, right: 400
   getBoundingClientRect: () => norm(rect),
 });
 
-const boot = (initialSync, { loginButtons = [] } = {}) => {
+const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
   const syncData = { ...initialSync };
   const localData = {};
   const lsStore = {};
+  if (feedMirror) lsStore["dyfilter-feed"] = JSON.stringify(feedMirror);
   const toasts = [];
   const bodyEvents = [];
   const handlers = { message: [], play: [], contextmenu: [] };
@@ -205,10 +206,18 @@ const boot = (initialSync, { loginButtons = [] } = {}) => {
       loginButtons.length = 0;
       for (const b of list) loginButtons.push(el(b));
     },
-    // 页面上作者链接的数量（诊断信息里会带上）
+    // 页面上作者链接的数量（诊断信息里会带上）；parent 用来模拟"链接和视频同属一张卡片"
     setUserLinks: (list) => {
       userLinks.length = 0;
-      for (const b of list) userLinks.push(el(b));
+      for (const b of list) {
+        const node = el(b);
+        if (b.parent) b.parent.appendChild(node);
+        userLinks.push(node);
+      }
+    },
+    // 接口元数据镜像：hook.js 落到 localStorage 的那份（首页响应早于 content 监听器）
+    seedFeedMirror: (metas) => {
+      lsStore["dyfilter-feed"] = JSON.stringify(metas);
     },
     // 播放卡片里的作者链接：a[href*="/user/<sec_uid>"]，文字就是昵称
     setDomAuthor: (href, text) => {
@@ -333,19 +342,20 @@ const ok = (cond, label) => {
   ok(JSON.stringify(ctx2.syncData.blocked) === JSON.stringify([{ sec: "SEC_META_ONLY", nick: "元数据昵称" }]), "链接无文字时按 sec_uid 回查接口昵称");
 }
 
-// 3.3 两个不同作者挤在同一段距离里：认不准就不写，绝不拉错人
+// 3.3 同一张卡片里两条不同作者的链接同样近：认不准就不写，绝不拉错人
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
-  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" })]);
+  const card = el({ text: "" });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" }, card)]);
   ctx.setUserLinks([
-    { text: "甲博主", href: "https://www.douyin.com/user/SEC_X", rect: { left: 20, top: 600, width: 120, height: 24 } },
-    { text: "乙博主", href: "https://www.douyin.com/user/SEC_Y", rect: { left: 150, top: 600, width: 120, height: 24 } },
+    { text: "甲博主", href: "https://www.douyin.com/user/SEC_X", rect: { left: 20, top: 600, width: 120, height: 24 }, parent: card },
+    { text: "乙博主", href: "https://www.douyin.com/user/SEC_Y", rect: { left: 150, top: 600, width: 120, height: 24 }, parent: card },
   ]);
   ctx.tick();
   ctx.blockViaMenu();
-  ok(ctx.syncData.blocked.length === 0, "同距歧义时不写黑名单");
+  ok(ctx.syncData.blocked.length === 0, "同卡片同距时不写黑名单");
   const diag = ctx.toasts.find((t) => t.includes("没认出手上这条的作者"));
-  ok(/同距/.test(diag), `诊断里说明是歧义：${diag}`);
+  ok(/同距\(SEC_X@0\/SEC_Y@0px\)/.test(diag), `诊断里点明是哪两条链接打架：${diag}`);
 }
 
 // 3.4 压在视频画面上的链接优先于只是靠近的；都没压住时要求明显更近才算数
@@ -369,6 +379,50 @@ const ok = (cond, label) => {
   ctx2.tick();
   ctx2.blockViaMenu();
   ok(ctx2.syncData.blocked.length === 0, "两条都没压住画面且距离接近时判为认不准");
+}
+
+// 3.5 顶栏头像那种 /user/self 也压在画面上：它不是任何作品的作者，要排除
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  const card = el({ text: "" });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" }, card)]);
+  ctx.setUserLinks([
+    { text: "我的头像", href: "https://www.douyin.com/user/self?from_tab_name=main", rect: { left: 20, top: 10, width: 44, height: 44 } },
+    { text: "本条作者", href: "https://www.douyin.com/user/SEC_REAL", rect: { left: 20, top: 600, width: 120, height: 24 }, parent: card },
+  ]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_REAL", nick: "本条作者" }]), "排除 /user/self，认卡片里的作者");
+}
+
+// 3.6 结构归属优先于像素距离：不在同一张卡片里的链接再近也不认
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  const card = el({ text: "" });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "", src: "" }, card)]);
+  ctx.setUserLinks([
+    { text: "别处的链接", href: "https://www.douyin.com/user/SEC_OUTSIDE", rect: { left: 20, top: 300, width: 120, height: 24 } },
+    { text: "同卡片作者", href: "https://www.douyin.com/user/SEC_INSIDE", rect: { left: 20, top: 600, width: 120, height: 24 }, parent: card },
+  ]);
+  ctx.tick();
+  ctx.blockViaMenu();
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_INSIDE", nick: "同卡片作者" }]), "按共同祖先判定归属，取同卡片那条");
+}
+
+// 3.7 首页响应早于 content 的监听器：从 hook 落在 localStorage 的镜像里补读元数据
+{
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] }, {
+    feedMirror: [{ id: "V50", desc: "d", nick: "镜像博主", sec: "SEC_MIRROR", ct: 1, live: 0, url: "https://v26-web.douyin.com/a/video/tos-cn/zz11223344556677?a=1" }],
+  });
+  ctx.setVideos([ctx.mkVideo({ vidKey: "V50", src: "" })]);
+  ctx.blockViaMenu();
+  ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_MIRROR", nick: "镜像博主" }]), "没收到 postMessage 也能靠镜像认出作者");
+
+  const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx2.seedFeedMirror([{ id: "V51", desc: "d", nick: "后落镜像的博主", sec: "SEC_LATE", ct: 1, live: 0, url: "https://x.com/a/b/uniq-tail-99887766" }]);
+  ctx2.setVideos([ctx2.mkVideo({ vidKey: "V51", src: "" })]);
+  ctx2.blockViaMenu();
+  ok(JSON.stringify(ctx2.syncData.blocked) === JSON.stringify([{ sec: "SEC_LATE", nick: "后落镜像的博主" }]), "拉黑前再回读一次镜像，拿到刚写入的那页");
 }
 
 // 4. 预加载的下一条也在播：取视口里占面积最大的那个视频，作者链接按它就近取

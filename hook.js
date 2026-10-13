@@ -224,13 +224,35 @@
     return { dropped };
   };
 
+  // content.js 在 document_idle 才挂载，首页那批响应早于它的监听器，postMessage 错过就补不回来了。
+  // 所以再往 localStorage 落一份（和配置同一条已验证可靠的跨世界通道），content 侧按需回读。
+  const MIRROR_MAX = 120;
+  const mirror = (metas) => {
+    try {
+      const prev = JSON.parse(localStorage.getItem("dyfilter-feed") || "[]");
+      const list = Array.isArray(prev) ? prev : [];
+      const seen = new Set(list.map((m) => String(m && m.id)));
+      for (const m of metas) {
+        const k = String(m && m.id);
+        if (k && k !== "undefined" && !seen.has(k)) {
+          seen.add(k);
+          list.push(m);
+        }
+      }
+      localStorage.setItem("dyfilter-feed", JSON.stringify(list.slice(-MIRROR_MAX)));
+    } catch (e) {}
+  };
+
   // 采集元数据（供 content.js 兜底判定），每个实例只做一次
   const collect = (xhr, cards) => {
     if (xhr.__dyCollected) return;
     if (!cards.length) return;
     xhr.__dyCollected = true;
     const metas = metasOf(cards);
-    if (metas.length) post({ type: "feed", metas });
+    if (metas.length) {
+      post({ type: "feed", metas });
+      mirror(metas);
+    }
   };
 
   const process = (xhr, payload, isText) => {

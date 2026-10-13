@@ -97,7 +97,10 @@
   // 每次页面加载重新计数，弹窗里的数字只反映当前这一页
   if (ctxOk()) chrome.storage.local.set({ capturedCount: 0, seamlessCount: 0, skippedCount: 0 });
   heartbeat();
-  hbTimer = setInterval(heartbeat, 3000);
+  hbTimer = setInterval(() => {
+    readFeedMirror();
+    heartbeat();
+  }, 3000);
 
   const droppedIds = new Set();
 
@@ -105,23 +108,7 @@
     const d = e.data;
     if (!d || d.source !== "dyfilter") return;
     if (d.type === "feed" && Array.isArray(d.metas)) {
-      for (const m of d.metas) {
-        const id = m && m.id && String(m.id);
-        if (id && !metas.has(id)) {
-          metas.set(id, m);
-          const key = urlKey(m.url);
-          if (key && !urlIndex.has(key)) urlIndex.set(key, id);
-          const tail = urlTail(m.url);
-          if (tail) {
-            const n = (tailSeen.get(tail) || 0) + 1;
-            tailSeen.set(tail, n);
-            // 同一个文件名出现在两张卡片上就作废，不猜是哪条
-            if (n === 1) tailIndex.set(tail, id);
-            else tailIndex.delete(tail);
-          }
-          if (id === currentVid) evaluate(currentVid, true);
-        }
-      }
+      absorbMetas(d.metas);
       reportStats();
     } else if (d.type === "dropped" && Array.isArray(d.ids)) {
       for (const id of d.ids) {
@@ -282,6 +269,36 @@
   const tailSeen = new Map();
   const tailIndex = new Map();
 
+  function absorbMetas(list) {
+    for (const m of list || []) {
+      const id = m && m.id && String(m.id);
+      if (!id || metas.has(id)) continue;
+      metas.set(id, m);
+      const key = urlKey(m.url);
+      if (key && !urlIndex.has(key)) urlIndex.set(key, id);
+      const tail = urlTail(m.url);
+      if (tail) {
+        const n = (tailSeen.get(tail) || 0) + 1;
+        tailSeen.set(tail, n);
+        // 同一个文件名出现在两张卡片上就作废，不猜是哪条
+        if (n === 1) tailIndex.set(tail, id);
+        else tailIndex.delete(tail);
+      }
+      if (id === currentVid) evaluate(currentVid, true);
+    }
+  }
+
+  // 首页那批响应比本脚本的监听器早到，postMessage 会整个错过：从 hook 落的镜像里补读一次
+  function readFeedMirror() {
+    try {
+      const raw = localStorage.getItem("dyfilter-feed");
+      if (!raw) return;
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) absorbMetas(list);
+    } catch (e) {}
+  }
+  readFeedMirror();
+
   const userLinkCount = () => {
     try {
       return document.querySelectorAll("a[href*='/user/']").length;
@@ -289,6 +306,17 @@
       return -1;
     }
   };
+
+  // 元数据条数 vs 镜像条数：分得开"hook 压根没采集"和"通道没送到 content"
+  function mirrorCount() {
+    try {
+      const raw = localStorage.getItem("dyfilter-feed");
+      const list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list.length : -1;
+    } catch (e) {
+      return -1;
+    }
+  }
 
   // 认不出作者时把各环节的计数打出来：是哪一条链断了，看提示就知道，不用猜
   function authorDiag() {
@@ -304,7 +332,7 @@
       `视频${document.querySelectorAll("video").length}`,
       `在播${playingVideos().length}`,
       `vid=${String(vid).slice(0, 10) || "无"}`,
-      `元数据${metas.size}`,
+      `元数据${metas.size}/镜像${mirrorCount()}`,
       `样例键=${sample.slice(0, 10) || "无"}`,
       `地址索引${urlIndex.size}/${tailIndex.size}`,
       `src=${urlTail(src).slice(-8) || "无"}`,
@@ -345,8 +373,25 @@
 
   let domNote = "";
 
+  // 顶栏头像那种 /user/self 也会压在视频画面上，它不是任何一条作品的作者
+  const NOT_AUTHOR_SEC = /^(self|recommend|follow|logout|setting)s?$/i;
+
+  // DOM 里两个节点的结构距离（共同祖先两边各差几层）；越小越可能是同一张卡片
+  function domDistance(from, to) {
+    const up = new Map();
+    let d = 0;
+    for (let n = to; n; n = n.parentElement, d += 1) up.set(n, d);
+    let e = 0;
+    for (let n = from; n; n = n.parentElement, e += 1) {
+      const v = up.get(n);
+      if (v !== undefined) return v + e;
+    }
+    return 1e9;
+  }
+
   // 作者链接不保证是 video 的祖先节点（抖音把视频和右侧信息栏做成兄弟节点），
-  // 所以按"离在播视频最近"来认，而不是沿 parentElement 上溯——上溯到列表容器会抓到别的卡片。
+  // 所以先按"结构上同属一张卡片"、再按像素就近来认，而不是沿 parentElement 上溯——
+  // 上溯到列表容器会抓到别的卡片。
   const NEAR_LINK = 260;
   function authorFromDom() {
     domNote = "";
@@ -359,24 +404,24 @@
     const near = [];
     for (const a of document.querySelectorAll('a[href*="/user/"]')) {
       const sec = secOfHref(a.href);
-      if (!sec) continue;
+      if (!sec || NOT_AUTHOR_SEC.test(sec)) continue;
       const ar = a.getBoundingClientRect ? a.getBoundingClientRect() : null;
       if (!ar || ar.width <= 0 || ar.height <= 0) continue;
       const gap = rectGap(ar, r);
       if (gap > NEAR_LINK) continue;
-      near.push({ a, sec, gap });
+      near.push({ a, sec, gap, dist: domDistance(a, v) });
     }
     if (!near.length) {
       domNote = "附近无作者链接";
       return null;
     }
-    near.sort((x, y) => x.gap - y.gap);
+    near.sort((x, y) => x.dist - y.dist || x.gap - y.gap);
     const best = near[0];
-    // 压在视频画面上的链接就是这一条的作者；够得着但没压住的，必须明显比对手更近才算数
+    // 结构上不同深度就已经分出了归属；只有"同在一张卡片、又同样近"的两条才算歧义
     const tol = best.gap > 0 ? Math.max(8, best.gap) : 8;
-    const rival = near.find((c) => c.sec !== best.sec && c.gap <= best.gap + tol);
+    const rival = near.find((c) => c.sec !== best.sec && c.dist <= best.dist && c.gap <= best.gap + tol);
     if (rival) {
-      domNote = `两个作者链接同距(${Math.round(best.gap)}/${Math.round(rival.gap)}px)`;
+      domNote = `同距(${best.sec.slice(0, 6)}@${Math.round(best.gap)}/${rival.sec.slice(0, 6)}@${Math.round(rival.gap)}px)`;
       return null;
     }
     return { nick: nickOfLink(best.a, best.sec), sec: best.sec };
@@ -416,6 +461,7 @@
 
   // 拉黑走独立的 blocked 列表（按 sec_uid 认人），不再往关键字里塞昵称。
   function blockCurrentAuthor() {
+    readFeedMirror();
     const who = currentAuthor();
     if (!who) {
       const diag = authorDiag();

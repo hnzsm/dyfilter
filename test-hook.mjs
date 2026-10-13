@@ -218,5 +218,17 @@ r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L10", "某主播", "�
 t("直播按 sec_uid 拉黑", !r.ids.includes("L10"), r.ids.join(","));
 t("未拉黑的直播保留", r.ids.includes("L11"), r.ids.join(","));
 
+// 元数据镜像：content.js 挂载晚于首页响应，postMessage 会整个错过，所以再落一份 localStorage
+setCfg(99999);
+store["dyfilter-feed"] = undefined;
+delete store["dyfilter-feed"];
+r = read(URL_FEED, feed([item("m1", 1, "标题一", "博主一", "SEC_M1"), item("m2", 1, "标题二", "博主二", "SEC_M2")]));
+const mirrored = JSON.parse(store["dyfilter-feed"] || "[]");
+t("采集结果落进 localStorage 镜像", mirrored.length === 2, JSON.stringify(mirrored.map((m) => m.id)));
+t("镜像带得上 sec_uid 与播放地址", mirrored[0].sec === "SEC_M1" && typeof mirrored[0].url === "string", JSON.stringify(mirrored[0]));
+r = read(URL_FEED, feed([item("m1", 1, "标题一", "博主一", "SEC_M1"), item("m3", 1, "标题三", "博主三", "SEC_M3")]));
+const mirrored2 = JSON.parse(store["dyfilter-feed"] || "[]");
+t("镜像按 id 去重、跨页累加", mirrored2.map((m) => m.id).join(",") === "m1,m2,m3", mirrored2.map((m) => m.id).join(","));
+
 console.log(results.join("\n"));
 console.log(results.some((x) => x.startsWith("FAIL")) ? "SOME FAILED" : "ALL PASS");

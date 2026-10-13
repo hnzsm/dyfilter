@@ -115,6 +115,21 @@ localData.loggedIn = 0;
 timers[0]();
 console.log("[stats/未登录]\n" + els.stats.textContent);
 
+// 场景：拉黑没认出作者，诊断行要原样出现在弹窗里
+localData.loggedIn = 1;
+localData.authorDbg = "视频3 在播1 vid=7693890338 元数据0/镜像0 样例键=无 地址索引0/0 src=AFj7DEPE 作者链接12 附近无作者链接";
+localData.authorDbgTs = Date.now();
+timers[0]();
+const dbgLine = els.stats.textContent.split("\n").find((l) => l.includes("没认出作者"));
+if (!dbgLine) throw new Error("诊断行没进弹窗");
+if (!dbgLine.includes("元数据0/镜像0")) throw new Error("诊断行内容被截断: " + dbgLine);
+console.log("[stats/拉黑诊断]\n" + els.stats.textContent);
+
+// 超过 5 分钟的旧诊断不再刷屏
+localData.authorDbgTs = Date.now() - 6 * 60 * 1000;
+timers[0]();
+if (els.stats.textContent.includes("没认出作者")) throw new Error("过期诊断仍在显示");
+
 // 保存按钮：只写自己的字段，不能把 blocked 冲掉
 localData.loggedIn = 1;
 els.enabled.checked = true;
