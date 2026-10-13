@@ -26,8 +26,8 @@ Chrome (MV3) 扩展：在抖音网页版首页推荐流里，按**发布时间**
 在播放器区域右键 →「拉黑该作者」（这一行是扩展补进**抖音自己的右键菜单**里的，样式跟它原有菜单项一致）。点一下把**当前正在播放这条内容的作者**在**抖音账号层面**拉黑，并立刻跳过它。
 
 - **拉黑 = 提交给抖音的拉黑接口**，不是插件里的开关：成功后对方在抖音的黑名单里，换设备、换浏览器、清了扩展都照样拦得住。解除也去抖音：**我 → 设置 → 隐私设置 → 黑名单管理**。
-- **实现方式是"只做接口直连，失败就报错"**（不模拟点击抖音自己的按钮）。**端点与参数已在登录态浏览器里抓包实测**（2026-10-13）：`POST https://www.douyin.com/aweme/v1/web/user/block/`，body 为 `application/x-www-form-urlencoded` 的 `block_type=0&sec_user_id=<sec_uid>&source=0&user_id=<数字uid>`，扩展里带 `credentials: include` 沿用页面登录 cookie。
-- **实测另一条关键结论：签名参数不是必需的**。`a_bogus` / `msToken` / `fp` / `verifyFp` 全部去掉后接口照样返回 `status_code: 0`；数字 `user_id` 省略也能成功 —— 所以只靠接口元数据里的 `sec_uid` 就够，不必再反查 uid。
+- **实现方式是"只做接口直连，失败就报错"**（不模拟点击抖音自己的按钮）。**端点与参数已在登录态浏览器里抓包实测**（2026-10-13）：`POST https://www.douyin.com/aweme/v1/web/user/block/`，`content-type: application/x-www-form-urlencoded`，body 为 `block_type=0&sec_user_id=<sec_uid>&source=0&user_id=<数字uid>`；数字 `user_id` 实测可省略，所以只靠接口元数据里的 `sec_uid` 就够。
+- **请求由 `hook.js`（MAIN world）代发，不是 content.js**：抖音的安全 SDK 包装了页面的 `fetch`/`XHR` 并补风控头，实测同一条请求在页面里发能成、在扩展的 isolated world 里裸 `fetch` 直接被 WAF **403 且没有 JSON 体**。所以 content.js 只把 `{id, sec}` 写进 `localStorage['dyfilter-block-req']`，hook.js 每 250ms 轮询取走、用页面自己的 `XMLHttpRequest`（`withCredentials`）发出，再把 `HTTP 状态 + 原始回包` 按同一个 `id` 写回 `localStorage['dyfilter-block-res']`；content.js 轮询到回包才决定后续。**同一个 id 只发一次**，8 秒拿不到回包判为"页面通道没跑起来"。
 - **接口没通过时不会静默失败**：这条博主写进插件本地黑名单继续拦着，同时把真实回包（HTTP 状态 + `status_code` + `status_msg`）写进诊断，弹窗 5 分钟内原样显示 `上次拉黑接口没通过：…` —— **看到这行就把它发我**。
 - **账号级成功后会把本地那条清掉**，抖音的黑名单是唯一真相；本地列表里剩下的，就是接口没通过、只由插件拦下的那部分。
 - 拉黑和屏蔽关键字是**两份独立列表**：拉黑名单存在 `chrome.storage.sync.blocked`，弹窗里单独一节可以逐个移除。本地这份按 `sec_uid` 匹配，卡片没带 `sec_uid` 时退回昵称**精确**匹配（不是子串，不会误伤同名前缀）。
@@ -47,7 +47,7 @@ Chrome (MV3) 扩展：在抖音网页版首页推荐流里，按**发布时间**
 - 配置下发走跨世界共享的 `localStorage['dyfilter-cfg']` + `document.documentElement.dataset.dyConfig`。反向 `postMessage` 在部分内核上不可靠，不再用作配置通道。
 - 识别屏蔽条目按**对象形状**而非固定字段名，兼容 `aweme_list` / `item_list` / `data` 等层级，以及 `{aweme:{}}`、`{aweme_info:{}}` 包装卡片，避免站点换字段名后过滤静默失效。
 - **直播卡片**同样处理：主播名可能挂在 `owner` / `user`，房间标题在 `title` / `live_title` / `status` 而非 `desc`，按形状取值后关键字屏蔽照常生效。直播没有"发布时间"（`create_time` 是开播时间），因此**不参与时间阈值判定**，只受关键字屏蔽。
-- `background.js`（MV3 service worker）只负责注册浏览器原生右键菜单并把点击事件转给当前标签页的 `content.js`；**账号级拉黑的请求由 `content.js` 在页面里直接发出**（isolated world 与页面同源，`credentials: include` 才带得上抖音的登录 cookie），只有接口没通过时才写 `chrome.storage.sync.blocked`，`hook.js` 通过现成的配置通道实时读到。抖音自绘菜单里那一行也由 `content.js` 注入（isolated world 与页面共享 DOM，能直接改）。
+- `background.js`（MV3 service worker）只负责注册浏览器原生右键菜单并把点击事件转给当前标签页的 `content.js`；**账号级拉黑的请求由 `hook.js` 在 MAIN world 用页面自己的 `XMLHttpRequest` 发出**（理由见上文：isolated world 里裸 `fetch` 会被 WAF 403），`content.js` 只负责认人、通过 `localStorage` 收发包、决定成功后清本地条目还是失败退回本地拦下，只有接口没通过时才写 `chrome.storage.sync.blocked`，`hook.js` 通过现成的配置通道实时读到。抖音自绘菜单里那一行也由 `content.js` 注入（isolated world 与页面共享 DOM，能直接改）。
 - 判定"手上这条"时，同时处于播放态的 `video` 可能不止一个（预加载的下一条未必 `paused`），取**视口里占面积最大**的那个，避免拉黑到还没看到的那条的作者。
 
 ## 弹窗「运行状态」怎么读
@@ -77,7 +77,8 @@ node test-popup.mjs   # 覆盖弹窗统计渲染、两类拉黑诊断行的显�
 
 ## 已知限制
 
-- **账号级拉黑的端点与参数已抓包实测**（`user/block/`，`sec_user_id` 放 POST body，且**不要求** `a_bogus` 签名）。还没实测的是抖音哪天开始对这个端点强制签名或改名 —— 真机上一旦回包非 0，弹窗那行诊断会原样带出 `status_msg`，发我即可按新样本改。
+- **账号级拉黑的端点与参数已抓包实测**（`user/block/`，`sec_user_id` 放 POST body）。**"不要求 `a_bogus` 签名"只对页面自己的网络层成立**：抖音的安全 SDK 会给页面 `fetch`/`XHR` 发出的请求补风控头，走这层就不用手拼签名；扩展侧绕过它裸发同一个请求，实测被 WAF 直接 403（连 JSON 体都没有）。所以这条链路依赖"页面仍在包装网络层"，一旦抖音改包装方式、改端点或开始强制签名，回包非 0 时弹窗那行诊断会原样带出 `HTTP 状态/status_code/status_msg`，发我即可按新样本改。
+- 拉黑通道靠 `localStorage` 轮询（hook.js 250ms、content.js 300ms，8 秒超时）。如果 `hook.js` 没注入成功（页面用了别的域名、或 MAIN world 注入被拦），失败诊断显示 `页面无响应(8s)`，此时内容仍会退到插件本地拦下。
 - 只在抖音**网页版首页推荐流**生效，且需要页面继续用当前这套 feed 接口；接口路径或字段大改时需要更新 `hook.js` 里的 `FEED_URL_RE` 与识别规则。
 - 重载扩展后，页面里旧版 content script 会变成孤儿并反复报 `Extension context invalidated`；扩展代码会自行判活停止上报，但**每次重载扩展请顺手 F5 刷新抖音页**。
 - 部分浏览器内核对 `chrome.storage.sync.onChanged` 等 API 支持不全，代码一律先特性检测再调用。

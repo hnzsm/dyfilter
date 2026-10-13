@@ -502,38 +502,53 @@
     });
   }
 
-  // 2026-10-13 实测抓包得到（登录态浏览器里手点一次「拉黑」）：
-  //   POST https://www.douyin.com/aweme/v1/web/user/block/
-  //   body: block_type=0&sec_user_id=<sec_uid>&source=0&user_id=<数字uid>
-  // 实测结论：a_bogus / msToken / fp / verifyFp 全部不是必需（去掉后仍 status_code:0），
-  // 数字 user_id 也可省略，只 sec_user_id 就够——接口元数据里我们本来就只稳定拿到 sec_uid。
-  const BLOCK_PATH = "/aweme/v1/web/user/block/";
-  const BLOCK_QUERY =
-    "device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=2&update_version_code=170400&version_code=170400&version_name=17.4.0&cookie_enabled=true&platform=PC";
+  // 请求本身交给 hook.js（MAIN world）用页面自己的 XHR 发：抖音的安全 SDK 会给请求补风控头，
+  // isolated world 里裸 fetch 会被 WAF 直接 403（实测无 JSON 体）。这里只走 localStorage 通道收发包。
+  const BLOCK_REQ = "dyfilter-block-req";
+  const BLOCK_RES = "dyfilter-block-res";
 
-  async function blockOnDouyin(sec) {
-    const body = `block_type=0&sec_user_id=${encodeURIComponent(sec)}&source=0`;
-    try {
-      const res = await fetch(`${BLOCK_PATH}?${BLOCK_QUERY}`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body,
-      });
-      const text = await res.text();
-      let j = null;
+  function blockOnDouyin(sec) {
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve) => {
+      let timer = 0;
+      const finish = (r) => {
+        if (timer) clearInterval(timer);
+        timer = 0;
+        resolve(r);
+      };
       try {
-        j = JSON.parse(text);
-      } catch (e) {}
-      const code = j && (j.status_code === undefined ? j.error_code : j.status_code);
-      const detail = `${res.status}${code === undefined ? "" : "/code" + code}${
-        j && j.status_msg ? `(${j.status_msg})` : text && code === undefined ? `(${text.slice(0, 40)})` : ""
-      }`;
-      if (res.ok && code === 0) return { ok: true, via: BLOCK_PATH, detail };
-      return { ok: false, detail };
-    } catch (e) {
-      return { ok: false, detail: `请求异常(${(e && e.name) || "?"})` };
-    }
+        localStorage.removeItem(BLOCK_RES);
+        localStorage.setItem(BLOCK_REQ, JSON.stringify({ id, sec }));
+      } catch (e) {
+        finish({ ok: false, detail: "跨世界通道不可用" });
+        return;
+      }
+      const started = Date.now();
+      timer = setInterval(() => {
+        let res = null;
+        try {
+          const raw = localStorage.getItem(BLOCK_RES);
+          if (raw) res = JSON.parse(raw);
+        } catch (e) {}
+        if (res && res.id === id) {
+          let j = null;
+          try {
+            j = JSON.parse(res.text || "");
+          } catch (e) {}
+          const code = j && (j.status_code === undefined ? j.error_code : j.status_code);
+          const detail = `${res.status}${code === undefined ? "" : "/code" + code}${
+            j && j.status_msg ? `(${j.status_msg})` : res.text && code === undefined ? `(${String(res.text).slice(0, 40)})` : ""
+          }`;
+          try {
+            localStorage.removeItem(BLOCK_REQ);
+            localStorage.removeItem(BLOCK_RES);
+          } catch (e) {}
+          finish({ ok: code === 0, detail });
+          return;
+        }
+        if (Date.now() - started > 8000) finish({ ok: false, detail: "页面无响应(8s)：注入的拉黑通道没跑起来" });
+      }, 300);
+    });
   }
 
   function blockCurrentAuthor() {

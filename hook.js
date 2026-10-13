@@ -404,4 +404,46 @@
   };
 
   document.documentElement.dataset.dyPatchMode = protoOk ? "proto" : "instance";
+
+  // 拉黑请求必须由页面自己的网络层发出：抖音的安全 SDK 包了 fetch/XHR 并补风控头，
+  // 扩展 isolated world 里的裸 fetch 会被 WAF 直接 403（实测连 JSON 体都没有）。
+  // 通道：content.js 写 localStorage['dyfilter-block-req']，这里取走、发请求、把回包写进 'dyfilter-block-res'。
+  const BLOCK_REQ = "dyfilter-block-req";
+  const BLOCK_RES = "dyfilter-block-res";
+  const BLOCK_PATH = "/aweme/v1/web/user/block/";
+  const BLOCK_QUERY =
+    "device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=2&update_version_code=170400&version_code=170400&version_name=17.4.0&cookie_enabled=true&platform=PC";
+  let lastBlockId = "";
+
+  const runBlock = (req) => {
+    const done = (status, text) => {
+      try {
+        localStorage.setItem(BLOCK_RES, JSON.stringify({ id: req.id, status, text: String(text || "").slice(0, 400) }));
+      } catch (e) {}
+    };
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${BLOCK_PATH}?${BLOCK_QUERY}`, true);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("content-type", "application/x-www-form-urlencoded");
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState === 4) done(xhr.status, xhr.responseText);
+      };
+      xhr.onerror = () => done(0, "");
+      xhr.send(`block_type=0&sec_user_id=${encodeURIComponent(req.sec)}&source=0`);
+    } catch (e) {
+      done(-1, String((e && e.message) || e).slice(0, 120));
+    }
+  };
+
+  setInterval(() => {
+    let req = null;
+    try {
+      const raw = localStorage.getItem(BLOCK_REQ);
+      if (raw) req = JSON.parse(raw);
+    } catch (e) {}
+    if (!req || !req.id || !req.sec || req.id === lastBlockId) return;
+    lastBlockId = req.id;
+    runBlock(req);
+  }, 250);
 })();

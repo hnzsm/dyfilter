@@ -168,15 +168,26 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
     },
   };
 
-  // 账号级拉黑的接口回包由用例控制：默认第一个端点就成功
-  const fetchCalls = [];
-  let fetchReplies = [{ status: 200, body: JSON.stringify({ status_code: 0 }) }];
+  // 账号级拉黑改走 localStorage 通道（真实请求由 hook.js 在 MAIN world 发），
+  // 这里模拟 hook：收到请求就记下，并按用例给的回包把结果写回去。
+  const blockReqs = [];
+  let blockReply = { status: 200, text: JSON.stringify({ status_code: 0 }) };
 
-  const fetchStub = async (url, opts) => {
-    fetchCalls.push({ url, opts });
-    const r = fetchReplies[Math.min(fetchCalls.length - 1, fetchReplies.length - 1)];
-    if (r instanceof Error) throw r;
-    return { ok: r.status < 400, status: r.status, text: async () => r.body };
+  const lsStub = {
+    setItem: (k, v) => {
+      lsStore[k] = v;
+      if (k === "dyfilter-block-req") {
+        try {
+          const req = JSON.parse(v);
+          blockReqs.push(req);
+          lsStore["dyfilter-block-res"] = JSON.stringify({ id: req.id, ...blockReply });
+        } catch (e) {}
+      }
+    },
+    getItem: (k) => lsStore[k] ?? null,
+    removeItem: (k) => {
+      delete lsStore[k];
+    },
   };
 
   new Function(
@@ -187,7 +198,7 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
     windowStub,
     documentStub,
     chrome,
-    { setItem: (k, v) => (lsStore[k] = v), getItem: (k) => lsStore[k] ?? null },
+    lsStub,
     (fn) => {
       intervals.push(fn);
       return intervals.length;
@@ -211,14 +222,16 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
         Object.assign(this, init);
       }
     },
-    fetchStub
+    async () => {
+      throw new Error("content.js 不该再自己发请求：拉黑由 MAIN world 的 hook.js 负责");
+    }
   );
 
   return {
-    fetchCalls,
+    blockReqs,
     docEvents,
-    setFetch: (...replies) => {
-      fetchReplies = replies;
+    setBlockReply: (reply) => {
+      blockReply = reply;
     },
     syncData,
     localData,
@@ -279,6 +292,8 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
     },
     blockViaMenu() {
       for (const fn of msgHandlers) fn({ type: "dyfilter-block-author" }, {}, () => {});
+      // 拉黑走 localStorage 通道，回包靠轮询取：立刻跑一轮定时器，用例就能 await flush() 收尾
+      for (const fn of intervals) fn();
     },
     injectedRow(menu) {
       return menu.children.find((c) => c.textContent === LABEL);
@@ -286,6 +301,7 @@ const boot = (initialSync, { loginButtons = [], feedMirror = null } = {}) => {
     clickRow(menu) {
       const row = this.injectedRow(menu);
       row && row.dispatch("click", { preventDefault() {}, stopPropagation() {} });
+      for (const fn of intervals) fn();
       return !!row;
     },
   };
@@ -295,8 +311,8 @@ let pass = 0;
 let fail = 0;
 // 拉黑改成先等接口回包，断言前要放掉微任务/定时器
 const flush = () => new Promise((r) => setTimeout(r, 0));
-// 认出来的作者，最终提交给抖音拉黑接口的账号 ID（抓包实测：sec_user_id 在 POST body 里，不在 query 上）
-const sentSec = (ctx) => (ctx.fetchCalls[0] && /(?:^|&)sec_user_id=([^&]*)/.exec(ctx.fetchCalls[0].opts.body || "") || [])[1] || "";
+// 认出来的作者，最终交给 MAIN world 去提交的账号 ID（真实请求由 hook.js 发）
+const sentSec = (ctx) => (ctx.blockReqs[0] && ctx.blockReqs[0].sec) || "";
 const ok = (cond, label) => {
   if (cond) pass += 1;
   else {
@@ -316,10 +332,9 @@ const ok = (cond, label) => {
   ok(!!ctx.injectedRow(menu), `菜单里补进了「${LABEL}」`);
   ctx.clickRow(menu);
   await flush();
-  ok(ctx.fetchCalls.length === 1 && /\/aweme\/v1\/web\/user\/block\//.test(ctx.fetchCalls[0].url), "调抖音实测的拉黑端点 user/block");
-  ok(sentSec(ctx) === "SEC_A", `sec_user_id 放在 POST body 里：${ctx.fetchCalls[0] && ctx.fetchCalls[0].opts.body}`);
-  ok(/block_type=0/.test(ctx.fetchCalls[0].opts.body) && /source=0/.test(ctx.fetchCalls[0].opts.body), "带上实测的 block_type/source 字段");
-  ok(ctx.fetchCalls[0].opts.method === "POST" && ctx.fetchCalls[0].opts.credentials === "include", "POST 且带上登录 cookie");
+  ok(ctx.blockReqs.length === 1, `认出作者后把拉黑交给 MAIN world 发：${JSON.stringify(ctx.blockReqs)}`);
+  ok(sentSec(ctx) === "SEC_A", "通道里传的是作者账号 ID");
+  ok(typeof ctx.blockReqs[0].id === "string" && ctx.blockReqs[0].id.length > 4, "请求带 id，回包按 id 对号");
   ok((ctx.syncData.blocked || []).length === 0, "账号级成功后本地黑名单不留条目");
   ok(JSON.stringify(ctx.syncData.keywords) === JSON.stringify(["广告"]), "关键字列表没被污染");
   ok(ctx.toasts.some((t) => t.includes("已在抖音账号里拉黑：某博主")), "提示说明是账号级拉黑");
@@ -331,12 +346,12 @@ const ok = (cond, label) => {
 // 1b. 接口没通过：留本地临时拦截，并把真实回包写进诊断
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
-  ctx.setFetch({ status: 200, body: JSON.stringify({ status_code: 8, status_msg: "invalid a_bogus" }) });
+  ctx.setBlockReply({ status: 200, text: JSON.stringify({ status_code: 8, status_msg: "invalid a_bogus" }) });
   ctx.feed([{ id: "V1", desc: "d", nick: "某博主", sec: "SEC_A", ct: 1, live: 0 }]);
   ctx.tick();
   ctx.blockViaMenu();
   await flush();
-  ok(ctx.fetchCalls.length === 1, `端点已实测确定，只发一次：${ctx.fetchCalls.length}`);
+  ok(ctx.blockReqs.length === 1, `只提交一次：${ctx.blockReqs.length}`);
   ok(JSON.stringify(ctx.syncData.blocked) === JSON.stringify([{ sec: "SEC_A", nick: "某博主" }]), "接口没通过时留本地临时拦截");
   ok(/invalid a_bogus/.test(ctx.localData.blockDbg || ""), `回包原样进诊断：${ctx.localData.blockDbg}`);
   ok(/code8/.test(ctx.localData.blockDbg || ""), "诊断里带 status_code");
@@ -350,7 +365,7 @@ const ok = (cond, label) => {
   ctx.tick();
   ctx.blockViaMenu();
   await flush();
-  ok(ctx.fetchCalls.length === 0, "没有 sec_uid 时不发拉黑请求");
+  ok(ctx.blockReqs.length === 0, "没有 sec_uid 时不提交拉黑");
   ok(ctx.syncData.blocked.length === 1, "退化为本地拦截");
   ok(ctx.toasts.some((t) => t.includes("没拿到账号 ID")), "说明为什么没走成账号级");
 }
@@ -575,7 +590,7 @@ const ok = (cond, label) => {
   ok((ctx.syncData.blocked || []).length === 0, "账号级成功后清掉本地那条（含改名前的旧条目）");
 
   const ctx2 = boot({ enabled: true, hours: 720, keywords: [], blocked: [{ sec: "SEC_A", nick: "旧名字" }] });
-  ctx2.setFetch({ status: 403, body: "Forbidden" });
+  ctx2.setBlockReply({ status: 403, text: "Forbidden" });
   ctx2.feed([{ id: "V1", desc: "d", nick: "新名字", sec: "SEC_A", ct: 1, live: 0 }]);
   ctx2.tick();
   ctx2.blockViaMenu();
@@ -659,7 +674,7 @@ const ok = (cond, label) => {
 {
   const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
   // 接口没通过时才留本地条目，这条本地条目才是要广播给 hook.js 的
-  ctx.setFetch({ status: 200, body: JSON.stringify({ status_code: 8, status_msg: "invalid a_bogus" }) });
+  ctx.setBlockReply({ status: 200, text: JSON.stringify({ status_code: 8, status_msg: "invalid a_bogus" }) });
   ctx.feed([{ id: "V1", desc: "d", nick: "广播博主", sec: "SEC_B", ct: 1, live: 0 }]);
   ctx.tick();
   ctx.blockViaMenu();

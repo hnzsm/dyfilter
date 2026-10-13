@@ -5,7 +5,11 @@ global.window = global;
 global.location = { origin: "https://www.douyin.com" };
 global.postMessage = (msg) => received.push(msg);
 window.postMessage = (msg) => received.push(msg);
-global.setInterval = () => 0;
+const intervals = [];
+global.setInterval = (fn) => {
+  intervals.push(fn);
+  return intervals.length;
+};
 const dataset = {};
 global.document = { documentElement: { dataset }, addEventListener() {}, body: {} };
 const store = {};
@@ -14,16 +18,25 @@ global.localStorage = {
   setItem: (k, v) => (store[k] = String(v)),
 };
 
+const sentXhrs = [];
 class XMLHttpRequest {
   constructor() {
     this.readyState = 0;
     this.responseType = "";
     this._raw = "";
+    this.status = 0;
   }
   open(method, url) {
+    this._method = method;
     this._url = url;
   }
-  send() {}
+  setRequestHeader(k, v) {
+    (this._headers = this._headers || {})[String(k).toLowerCase()] = v;
+  }
+  send(body) {
+    this._body = body == null ? "" : String(body);
+    sentXhrs.push(this);
+  }
   addEventListener() {}
   get responseText() {
     return this.readyState !== 4 ? "" : this._raw;
@@ -229,6 +242,33 @@ t("镜像带得上 sec_uid 与播放地址", mirrored[0].sec === "SEC_M1" && typ
 r = read(URL_FEED, feed([item("m1", 1, "标题一", "博主一", "SEC_M1"), item("m3", 1, "标题三", "博主三", "SEC_M3")]));
 const mirrored2 = JSON.parse(store["dyfilter-feed"] || "[]");
 t("镜像按 id 去重、跨页累加", mirrored2.map((m) => m.id).join(",") === "m1,m2,m3", mirrored2.map((m) => m.id).join(","));
+
+// 拉黑请求由 MAIN world 代发（isolated world 裸 fetch 会被 WAF 403）
+store["dyfilter-block-req"] = JSON.stringify({ id: "r1", sec: "SEC_Z" });
+intervals.forEach((fn) => fn());
+const bx = sentXhrs[sentXhrs.length - 1];
+t(
+  "拉黑走页面自己的 XHR + 实测端点",
+  !!bx && bx._method === "POST" && /\/aweme\/v1\/web\/user\/block\//.test(bx._url),
+  bx ? `${bx._method} ${bx._url.slice(0, 60)}` : "没发出请求"
+);
+t(
+  "body 带上实测抓到的字段",
+  !!bx && /block_type=0/.test(bx._body) && /sec_user_id=SEC_Z/.test(bx._body) && /source=0/.test(bx._body),
+  bx ? bx._body : ""
+);
+t("带上登录 cookie 与表单头", !!bx && bx.withCredentials === true && /x-www-form-urlencoded/.test((bx._headers || {})["content-type"] || ""), JSON.stringify(bx && bx._headers));
+if (bx) {
+  bx.status = 200;
+  bx.readyState = 4;
+  bx._raw = JSON.stringify({ status_code: 0 });
+  bx.onreadystatechange();
+}
+const bres = JSON.parse(store["dyfilter-block-res"] || "{}");
+t("回包按 id 写回通道给 content", bres.id === "r1" && bres.status === 200 && /status_code/.test(bres.text), store["dyfilter-block-res"]);
+const before = sentXhrs.length;
+intervals.forEach((fn) => fn());
+t("同一条请求不重复提交", sentXhrs.length === before, `又发了 ${sentXhrs.length - before} 次`);
 
 console.log(results.join("\n"));
 console.log(results.some((x) => x.startsWith("FAIL")) ? "SOME FAILED" : "ALL PASS");
