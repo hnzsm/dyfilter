@@ -49,10 +49,7 @@ const el = ({ text = "", rect = { left: 0, top: 0, width: 0, height: 0 }, positi
   return node;
 };
 
-const LOGGED_IN_COOKIE = "ttwid=1; sessionid=abcdef; sid_guard=xyz";
-const LOGGED_OUT_COOKIE = "ttwid=1; __ac_nonce=0123456";
-
-const boot = (initialSync, { cookie = LOGGED_IN_COOKIE } = {}) => {
+const boot = (initialSync, { loginButtons = [] } = {}) => {
   const syncData = { ...initialSync };
   const localData = {};
   const lsStore = {};
@@ -115,13 +112,12 @@ const boot = (initialSync, { cookie = LOGGED_IN_COOKIE } = {}) => {
   const body = el({ position: "" });
   body.dispatchEvent = (evt) => bodyEvents.push(evt.type);
   const documentStub = {
-    cookie,
     documentElement: Object.assign(root, { dataset: { dyMainHook: "1", dyPatchMode: "proto" } }),
     body,
     addEventListener: (t, fn) => (handlers[t] || handlers.message).push(fn),
     dispatchEvent: () => {},
     elementsFromPoint: () => pointStack,
-    querySelectorAll: (sel) => (sel === "video" ? [video] : []),
+    querySelectorAll: (sel) => (sel === "video" ? [video] : sel.includes("button") ? loginButtons : []),
     createElement: () => {
       const node = el();
       Object.defineProperty(node, "textContent", {
@@ -166,8 +162,10 @@ const boot = (initialSync, { cookie = LOGGED_IN_COOKIE } = {}) => {
     toasts,
     bodyEvents,
     el,
-    setCookie: (v) => {
-      documentStub.cookie = v;
+    // 页面上有没有可见的「登录」按钮 = content.js 判断登录态的依据
+    setLoginButtons: (list) => {
+      loginButtons.length = 0;
+      for (const b of list) loginButtons.push(el(b));
     },
     // 页面上的作者链接：a[href*="/user/<sec_uid>"]，文字就是昵称
     setDomAuthor: (href, text) => {
@@ -269,17 +267,33 @@ const ok = (cond, label) => {
   ok(ctx.toasts.some((t) => t.includes("已经拉黑了")), "重复拉黑给出提示");
 }
 
-// 5. 未登录时不往抖音菜单里塞这一行
+// 5. 登录态：只在页面上有可见「登录」按钮时才当作未登录（判不准就给入口）
 {
-  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] }, { cookie: LOGGED_OUT_COOKIE });
+  const ctx = boot({ enabled: true, hours: 720, keywords: [], blocked: [] });
+  ctx.setLoginButtons([{ text: "登录", rect: { left: 1200, top: 20, width: 64, height: 32 } }]);
   ctx.contextmenu();
-  const menu = ctx.makeMenu();
+  let menu = ctx.makeMenu();
   ctx.fireMutation(menu);
-  ok(!ctx.injectedRow(menu), "未登录时不注入拉黑行");
-  ctx.setCookie(LOGGED_IN_COOKIE);
-  const later = ctx.makeMenu();
-  ctx.fireMutation(later);
-  ok(!!ctx.injectedRow(later), "登录态恢复后重新右键即可注入");
+  ok(!ctx.injectedRow(menu), "有可见登录按钮时不注入拉黑行");
+
+  ctx.setLoginButtons([{ text: "登录", rect: { left: 0, top: 0, width: 0, height: 0 } }]);
+  ctx.contextmenu();
+  menu = ctx.makeMenu();
+  ctx.fireMutation(menu);
+  ok(!!ctx.injectedRow(menu), "登录按钮被隐藏时视为已登录，照常注入");
+
+  ctx.setLoginButtons([{ text: "登录其他账号", rect: { left: 100, top: 100, width: 120, height: 32 } }]);
+  ctx.contextmenu();
+  menu = ctx.makeMenu();
+  ctx.fireMutation(menu);
+  ok(!!ctx.injectedRow(menu), "文案不是纯「登录」的按钮不算未登录");
+
+  // 登录墙盖在页面中间时也有可见的「登录」按钮，但它不在顶栏，不能据此判定未登录
+  ctx.setLoginButtons([{ text: "登录", rect: { left: 500, top: 600, width: 64, height: 32 } }]);
+  ctx.contextmenu();
+  menu = ctx.makeMenu();
+  ctx.fireMutation(menu);
+  ok(!!ctx.injectedRow(menu), "顶栏以外的登录按钮不影响给入口");
 }
 
 // 6. 菜单节点被复用（只切 display）时，走鼠标点元素栈兜住

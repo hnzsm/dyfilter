@@ -89,7 +89,7 @@ const renderStats = () => {
         `页面生效阈值：${st.cfgHours} 小时`,
       ];
       if (ok(st.contentTs, 15000) && !st.loggedIn) {
-        lines.push("未检测到抖音登录态：右键菜单里不会出现「拉黑该作者」。");
+        lines.push("顶栏还有「登录」按钮：视为未登录，右键菜单里不给「拉黑该作者」。");
       } else if (!ok(st.contentTs, 15000)) {
         lines.push("请先在抖音页按 F12 打开控制台，把下方两项检查的结果发我：");
         lines.push("1. document.documentElement.dataset.dyMainHook");

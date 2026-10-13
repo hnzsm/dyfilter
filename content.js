@@ -61,11 +61,22 @@
 
   let hbTimer = 0;
   // 拉黑要有账号才有意义，未登录时不往抖音自己的菜单里塞这一行。
-  // 读不到 cookie（被内核挡掉）时不作为依据，宁可用不可少。
-  const LOGIN_COOKIE = /(?:^|;\s*)(?:sessionid|session_t|sid_guard)=/;
+  // 判据必须是"正向认出未登录"：上一版拿 document.cookie 里的 sessionid 判断，
+  // 结果登录态也读不到那个名字，整行菜单被藏掉了（用户实测：右键没菜单）。
+  // 现在只在页面上有可见「登录」按钮时才算未登录，判不准就照常给入口。
+  const LOGIN_TEXT = /^(登录|注册|手机号登录|扫码登录)$/;
+  // 登录墙盖在页面上时，未登录的访客也会看到一个可见的「登录」按钮，
+  // 但它挂在弹层里而不是右上角工具条。只认顶栏里那个，判不准就给入口。
+  const TOP_BAR_H = 140;
   const loggedIn = () => {
-    const raw = typeof document.cookie === "string" ? document.cookie : "";
-    return raw ? LOGIN_COOKIE.test(raw) : true;
+    const nodes = document.querySelectorAll("a, button, [role='button']");
+    for (const node of nodes) {
+      const text = (node.textContent || "").trim();
+      if (!LOGIN_TEXT.test(text)) continue;
+      const r = node.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && r.top < TOP_BAR_H) return false;
+    }
+    return true;
   };
 
   const heartbeat = () => {
