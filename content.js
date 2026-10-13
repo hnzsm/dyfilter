@@ -239,6 +239,105 @@
     });
   }
 
+  // 播放器区域被抖音自己 preventDefault 接管，弹的是页面画的菜单，浏览器原生菜单看不到。
+  // 这里在它的菜单弹出后补一行「屏蔽这个博主」，样式直接克隆它自己的一行。
+  const MENU_LABEL = "屏蔽这个博主";
+  let menuAnchor = null; // 最近一次右键的位置，用来认出"刚弹出来的就是那个菜单"
+
+  const rowsOf = (el) => {
+    const pick = (node) => Array.from(node.children).filter((c) => (c.textContent || "").trim());
+    const kids = pick(el);
+    if (kids.length >= 2) return kids;
+    if (el.children.length === 1) {
+      const inner = pick(el.children[0]);
+      if (inner.length >= 2) return inner;
+    }
+    return [];
+  };
+
+  const looksLikeMenu = (el) => {
+    if (!el || el.nodeType !== 1 || !menuAnchor) return false;
+    if (el.dataset.dyAuthorMenu) return false;
+    if (Date.now() - menuAnchor.at > 1500) return false;
+    const pos = window.getComputedStyle ? window.getComputedStyle(el).position : "";
+    if (pos !== "fixed" && pos !== "absolute") return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 60 || r.height < 24) return false;
+    // 菜单一般贴着鼠标位置展开，留 80px 容差应对边界翻转
+    if (Math.abs(r.left - menuAnchor.x) > 80 || Math.abs(r.top - menuAnchor.y) > 80) return false;
+    return rowsOf(el).length >= 2;
+  };
+
+  const closeMenu = (menuEl) => {
+    // 模拟一次"菜单外按下"，交给页面自己的关闭逻辑；直接 remove 它的节点可能让它下次弹不出来
+    for (const type of ["pointerdown", "mousedown", "click"]) {
+      document.body.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+    }
+  };
+
+  function injectInto(menuEl) {
+    const rows = rowsOf(menuEl);
+    if (!rows.length) return;
+    menuEl.dataset.dyAuthorMenu = "1";
+    const row = rows[rows.length - 1].cloneNode(true);
+    row.textContent = MENU_LABEL;
+    rows[0].parentNode.appendChild(row);
+    row.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu(menuEl);
+      blockCurrentAuthor();
+    });
+  }
+
+  const adopt = (node) => {
+    if (!node || node.nodeType !== 1) return false;
+    if (looksLikeMenu(node)) {
+      injectInto(node);
+      return true;
+    }
+    for (const child of Array.from(node.children)) {
+      if (looksLikeMenu(child)) {
+        injectInto(child);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // 路径一：菜单节点是新插入 DOM 的（React portal 常见）
+  if (window.MutationObserver) {
+    new window.MutationObserver((records) => {
+      for (const rec of records) {
+        for (const node of Array.from(rec.addedNodes)) if (adopt(node)) return;
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  // 路径二：菜单节点被复用、只切 display，用鼠标点处的元素栈往上找
+  function probeMenu() {
+    if (!menuAnchor || !document.elementsFromPoint) return;
+    const stack = document.elementsFromPoint(menuAnchor.x, menuAnchor.y) || [];
+    for (const el of stack) {
+      let cur = el;
+      for (let depth = 0; cur && depth < 6; depth += 1, cur = cur.parentElement) {
+        if (looksLikeMenu(cur)) {
+          injectInto(cur);
+          return;
+        }
+      }
+    }
+  }
+
+  document.addEventListener(
+    "contextmenu",
+    (e) => {
+      menuAnchor = { x: e.clientX, y: e.clientY, at: Date.now() };
+      for (const ms of [60, 180, 400]) setTimeout(probeMenu, ms);
+    },
+    true
+  );
+
   setInterval(() => {
     const vid = findCurrentVid();
     if (!vid) return;
