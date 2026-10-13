@@ -150,5 +150,54 @@ const first = JSON.parse(xhr3.responseText);
 const second = JSON.parse(xhr3.responseText);
 t("两次读取结果一致", JSON.stringify(first) === JSON.stringify(second), JSON.stringify(second.aweme_list.map((a) => a.aweme_id)));
 
+// 直播卡片：字段路径不同（owner/room_id/live_title），且没有发布时间
+const liveCard = (id, nick, title, extra = {}) => ({
+  aweme_id: id,
+  aweme_type: 2,
+  room_id: String(Number(id.slice(1)) + 100),
+  owner: { nickname: nick },
+  extra_info: { live_title: title },
+  ...extra,
+});
+setCfg(1, ["xx主播"]);
+r = read(
+  URL_FEED,
+  JSON.stringify({
+    aweme_list: [liveCard("L1", "xx主播", "深夜聊天"), liveCard("L2", "别的台", "唱歌"), item("v1", 9999)],
+  })
+);
+t("直播命中作者名被删", !r.ids.includes("L1"), r.ids.join(","));
+t("未命中关键字的直播保留", r.ids.includes("L2"), r.ids.join(","));
+setCfg(1, []);
+r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L8", "甲", "跳舞"), liveCard("L9", "乙", "唱歌")] }));
+t("直播不被时间阈值误杀", JSON.stringify(r.ids) === '["L8","L9"]', r.ids.join(","));
+t("视频仍按时间删除", !r.ids.includes("v1"), r.ids.join(","));
+
+setCfg(1, ["深夜"]);
+r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L3", "某台", "深夜电台"), item("v2", 0)] }));
+t("直播命中房间标题被删", !r.ids.includes("L3"), r.ids.join(","));
+
+setCfg(1, ["主播"]);
+r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L4", "xx主播", "聊天"), liveCard("L5", "yy主播", "唱歌")] }));
+t("整页只剩直播且全命中时不改写", JSON.stringify(r.ids) === '["L4","L5"]', r.ids.join(","));
+
+// 非卡片数组不受影响
+setCfg(168, []);
+const noise = {
+  aweme_list: [item("n1", 1), item("n2", 9000)],
+  extra: [{ url: "a" }, { url: "b" }],
+};
+r = read(URL_FEED, JSON.stringify(noise));
+t("普通对象数组不被误删", r.out.extra.length === 2, JSON.stringify(r.out.extra));
+t("卡片数组正常过滤", JSON.stringify(r.ids) === '["n1"]', r.ids.join(","));
+
+// 直播卡片也可能从 live/feed 兄弟路径下发
+setCfg(168, ["xx主播"]);
+r = read(
+  "https://www.douyin.com/aweme/v1/web/live/feed/?x=1",
+  JSON.stringify({ aweme_list: [liveCard("L6", "xx主播", "聊天"), liveCard("L7", "正常台", "跳舞")] })
+);
+t("live/feed 路径同样过滤", JSON.stringify(r.ids) === '["L7"]', r.ids.join(","));
+
 console.log(results.join("\n"));
 console.log(results.some((x) => x.startsWith("FAIL")) ? "SOME FAILED" : "ALL PASS");

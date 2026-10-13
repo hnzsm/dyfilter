@@ -2,7 +2,8 @@
   if (window.__dyfilterHooked) return;
   window.__dyfilterHooked = true;
 
-  const FEED_URL_RE = /\/aweme\/v1\/web\/(tab\/feed|general\/feed|hotboard\/feed|feed)\/|\/multi\/aweme/;
+  // 首页推荐流的直播卡片可能走 live/feed 这类兄弟路径，按 */feed/ 统一放行
+  const FEED_URL_RE = /\/aweme\/v1\/web\/[a-z/]*feed\/|\/multi\/aweme/;
   const beat = () => {
     document.documentElement.dataset.dyMainHook = String(Date.now());
   };
@@ -33,34 +34,66 @@
     window.postMessage({ source: "dyfilter", ...msg }, window.location.origin);
   };
 
-  const toMeta = (a) => {
-    const id = a && (a.aweme_id || a.item_id);
-    if (!id) return null;
-    return {
-      id: String(id),
-      desc: a.desc || "",
-      nick: (a.author && a.author.nickname) || "",
-      ct: Number(a.create_time) || 0,
-    };
-  };
+  // 卡片识别一律按形状取值：视频在 desc / author.nickname，直播卡片字段路径不同
+  // （标题常在 title / live_title / status，主播在 owner / user / anchor），
+  // 写死单一路径会让直播卡片整批漏掉。
+  const ID_KEYS = ["aweme_id", "item_id", "room_id", "id_str"];
+  const SUB_KEYS = ["aweme", "aweme_info", "author", "owner", "user", "anchor", "room", "room_data", "extra_info", "data"];
+  const TITLE_KEYS = ["desc", "title", "live_title", "status", "content"];
+  const NICK_KEYS = ["nickname", "nick_name", "author_nickname"];
 
-  const walk = (node, out, depth) => {
-    if (!node || depth > 12 || out.length > 200) return;
-    if (Array.isArray(node)) {
-      for (const n of node) walk(n, out, depth + 1);
-      return;
+  const isObj = (o) => !!o && typeof o === "object" && !Array.isArray(o);
+  const strOf = (o, keys) => {
+    if (!isObj(o)) return "";
+    for (const k of keys) {
+      const v = o[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
     }
-    if (typeof node === "object") {
-      const m = toMeta(node);
-      if (m && m.ct) out.push(m);
-      for (const k in node) walk(node[k], out, depth + 1);
-    }
+    return "";
   };
+  const fieldOf = (o, keys) => {
+    const direct = strOf(o, keys);
+    if (direct) return direct;
+    for (const k of SUB_KEYS) {
+      const v = strOf(o && o[k], keys);
+      if (v) return v;
+    }
+    return "";
+  };
+  const idOf = (o) => {
+    if (!isObj(o)) return "";
+    for (const k of ID_KEYS) {
+      const v = o[k];
+      if (typeof v === "string" && v) return v;
+      if (typeof v === "number" && v) return String(v);
+    }
+    for (const k of SUB_KEYS) {
+      const v = idOf(o[k]);
+      if (v) return v;
+    }
+    return "";
+  };
+  const timeOf = (o) => Number(o && (o.create_time || o.create_time_seconds)) || 0;
+  const isLive = (o) =>
+    isObj(o) && (o.aweme_type === 2 || !!o.room_id || isObj(o.room_data) || isObj(o.room) || !!strOf(o, ["live_type"]));
+  const isCard = (o) =>
+    isObj(o) && !!idOf(o) && (timeOf(o) > 0 || o.aweme_type !== undefined || isLive(o) || !!fieldOf(o, TITLE_KEYS) || !!fieldOf(o, NICK_KEYS));
 
-  const isBlocked = (a, now, cfg) => {
-    const ct = Number(a && a.create_time) || 0;
-    if (ct > 0 && (now - ct) / 3600 > cfg.hours) return true;
-    const text = `${(a && a.desc) || ""} ${((a && a.author && a.author.nickname) || "")}`.toLowerCase();
+  const cardTitle = (o) => fieldOf(o, TITLE_KEYS);
+  const cardNick = (o) => fieldOf(o, NICK_KEYS);
+  const cardMeta = (o) => ({
+    id: idOf(o),
+    desc: cardTitle(o),
+    nick: cardNick(o),
+    ct: timeOf(o),
+    live: isLive(o) ? 1 : 0,
+  });
+
+  const isBlocked = (o, now, cfg) => {
+    const m = cardMeta(o);
+    // 直播没有"发布时间"可言（create_time 是开播时间），只受关键字约束
+    if (!m.live && m.ct > 0 && (now - m.ct) / 3600 > cfg.hours) return true;
+    const text = `${m.desc} ${m.nick}`.toLowerCase();
     for (const kw of cfg.keywords) {
       const k = String(kw).trim().toLowerCase();
       if (k && text.includes(k)) return true;
@@ -80,56 +113,77 @@
     return payload && typeof payload === "object" ? payload : null;
   };
 
-  const isAweme = (o) =>
-    !!o && typeof o === "object" && (o.aweme_id || o.item_id) && Number(o.create_time) > 0;
+  const unwrapCard = (el) => {
+    if (!isObj(el)) return null;
+    if (isCard(el)) return el;
+    for (const k in el) if (isCard(el[k])) return el[k]; // {aweme:{}} / {aweme_info:{}} 包装
+    return null;
+  };
 
-  // 递归删掉任意层级"作品数组"里命中的条目。各接口字段名不一致（aweme_list / item_list / data / list），
-  // 且卡片可能是 {aweme:{...}} / {aweme_info:{...}} 包装，所以只按对象形状识别，
-  // 避免抖音换字段名后接口层过滤静默失效。先统计后落刀：中途改坏会让删空保护失效。
-  const filterJson = (json) => {
+  // 一次遍历同时供采集和过滤使用。只认"卡片数组"（数组里过半元素是卡片），
+  // 避免误伤响应里其它带 id 的对象数组。
+  const scanCards = (json) => {
+    const found = [];
+    const dive = (node, depth, key) => {
+      if (!node || typeof node !== "object" || depth > 10) return;
+      if (Array.isArray(node)) {
+        const hits = [];
+        for (let i = 0; i < node.length; i++) {
+          const card = unwrapCard(node[i]);
+          if (card) hits.push({ card, i });
+          else dive(node[i], depth + 1, key);
+        }
+        if (hits.length && hits.length * 2 >= node.length) {
+          for (const h of hits) found.push({ card: h.card, arr: node, i: h.i, top: key === "aweme_list" });
+        }
+        return;
+      }
+      if (isObj(node)) for (const k in node) dive(node[k], depth + 1, k);
+    };
+    dive(json, 0, "");
+    return found;
+  };
+
+  const metasOf = (cards) => {
+    const out = [];
+    const seen = new Set();
+    for (const c of cards) {
+      const m = cardMeta(c.card);
+      if (m.id && !seen.has(m.id)) {
+        seen.add(m.id);
+        out.push(m);
+      }
+    }
+    return out;
+  };
+
+  // 返回 { json, dropped }；不改写的两种情况：没有命中、改写完会一张不剩
+  const filterCards = (cards) => {
     const cfg = getCfg();
-    if (!cfg.enabled || !json || typeof json !== "object") return null;
+    if (!cfg.enabled || !cards.length) return null;
     const now = Date.now() / 1000;
     const dropped = [];
     const seen = new Set();
     const marks = [];
     let kept = 0;
-    let keptTop = -1;
-    const awemeOf = (o) => {
-      if (!o || typeof o !== "object") return null;
-      if (isAweme(o)) return o;
-      for (const k in o) if (isAweme(o[k])) return o[k];
-      return null;
-    };
-    const dive = (node, depth, key) => {
-      if (!node || typeof node !== "object" || depth > 10) return;
-      if (Array.isArray(node)) {
-        if (key === "aweme_list" && keptTop < 0) keptTop = 0;
-        for (let i = 0; i < node.length; i++) {
-          const a = awemeOf(node[i]);
-          if (!a) {
-            dive(node[i], depth + 1, key);
-            continue;
-          }
-          if (!isBlocked(a, now, cfg)) {
-            kept += 1;
-            if (key === "aweme_list") keptTop += 1;
-            continue;
-          }
-          const id = String(a.aweme_id || a.item_id);
-          if (!seen.has(id)) {
-            seen.add(id);
-            dropped.push(id);
-          }
-          marks.push({ arr: node, i });
-        }
-        return;
+    let keptTop = 0;
+    let sawTop = false;
+    for (const c of cards) {
+      if (c.top) sawTop = true;
+      if (!isBlocked(c.card, now, cfg)) {
+        kept += 1;
+        if (c.top) keptTop += 1;
+        continue;
       }
-      for (const k in node) dive(node[k], depth + 1, k);
-    };
-    dive(json, 0, "");
-    // 实测把每页删空会让播放器卡死不再续拉，所以只在还能留下内容时改写
-    if (!dropped.length || (keptTop >= 0 ? keptTop : kept) <= 0) return null;
+      const id = idOf(c.card);
+      if (!seen.has(id)) {
+        seen.add(id);
+        dropped.push(id);
+      }
+      marks.push(c);
+    }
+    // 实测把每页删空会让播放器卡死不再续拉
+    if (!dropped.length || (sawTop ? keptTop : kept) <= 0) return null;
     const groups = new Map();
     for (const m of marks) {
       const list = groups.get(m.arr) || [];
@@ -139,23 +193,18 @@
     for (const [arr, idxs] of groups) {
       for (const i of idxs.sort((a, b) => b - a)) arr.splice(i, 1);
     }
-    return { json, dropped };
+    return { dropped };
   };
 
   // 采集元数据（供 content.js 兜底判定），每个实例只做一次
-  const collect = (xhr, payload) => {
+  const collect = (xhr, cards) => {
     if (xhr.__dyCollected) return;
-    const json = asJson(payload);
-    if (!json) return;
+    if (!cards.length) return;
     xhr.__dyCollected = true;
-    const out = [];
-    walk(json, out, 0);
-    const seen = new Set();
-    const metas = out.filter((m) => m && !seen.has(m.id) && seen.add(m.id));
+    const metas = metasOf(cards);
     if (metas.length) post({ type: "feed", metas });
   };
 
-  // 改写 + 采集；isText 决定返回字符串还是对象
   const process = (xhr, payload, isText) => {
     if (xhr.__dyRawSeen === payload && xhr.__dyResult) {
       const cached = xhr.__dyResult;
@@ -164,13 +213,13 @@
     }
     xhr.__dyRawSeen = payload;
     const json = asJson(payload);
-    collect(xhr, json);
-    const filtered = json ? filterJson(json) : null;
+    if (!json) return payload;
+    const cards = scanCards(json);
+    collect(xhr, cards);
+    const filtered = filterCards(cards);
     if (filtered) post({ type: "dropped", ids: filtered.dropped });
-    const result = filtered ? filtered.json : json;
-    if (!result) return payload; // 解析不出来，原样返回
-    xhr.__dyResult = result;
-    return isText ? JSON.stringify(result) : result;
+    xhr.__dyResult = json;
+    return isText ? JSON.stringify(json) : json;
   };
 
   const descText = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, "responseText");
@@ -246,7 +295,8 @@
     if (payload == null && (xhr.responseType === "" || xhr.responseType === "text")) {
       payload = safeCall(nativeText, xhr);
     }
-    collect(xhr, payload);
+    const json = asJson(payload);
+    if (json) collect(xhr, scanCards(json));
   };
 
   const nativeOpen = XMLHttpRequest.prototype.open;
@@ -279,14 +329,15 @@
             .then((t) => {
               const json = asJson(t);
               if (json) {
-                collect({ __dyCollected: false }, json);
-                const filtered = filterJson(json);
+                const cards = scanCards(json);
+                collect({ __dyCollected: false }, cards);
+                const filtered = filterCards(cards);
                 if (filtered) {
                   post({ type: "dropped", ids: filtered.dropped });
                   const headers = new Headers(res.headers);
                   headers.delete("content-length");
                   headers.delete("content-encoding");
-                  return new Response(JSON.stringify(filtered.json), {
+                  return new Response(JSON.stringify(json), {
                     status: res.status,
                     statusText: res.statusText,
                     headers,

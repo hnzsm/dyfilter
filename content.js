@@ -114,7 +114,8 @@
     if (droppedIds.has(vid)) return { reason: "接口层漏网" };
     const meta = metas.get(vid);
     if (!meta) return null;
-    if (meta.ct > 0) {
+    // 直播卡片的 create_time 是开播时间，不参与"发布超过 N 小时"判定
+    if (meta.ct > 0 && !meta.live) {
       const ageHours = (Date.now() / 1000 - meta.ct) / 3600;
       if (ageHours > settings.hours) return { reason: `发布已 ${Math.floor(ageHours)} 小时`, meta };
     }
