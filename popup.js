@@ -17,13 +17,53 @@ const normalizeHours = (s) => {
   return 720;
 };
 
+// 拉黑名单：右键菜单写进来的，这里只做展示和移除
+let blockedList = [];
+
 safe(() => {
-  chrome.storage.sync.get({ enabled: true, hours: null, days: null, keywords: [] }, (s) => {
+  chrome.storage.sync.get({ enabled: true, hours: null, days: null, keywords: [], blocked: [] }, (s) => {
     $("enabled").checked = s.enabled !== false;
     $("hours").value = normalizeHours(s);
     $("keywords").value = (s.keywords || []).join("\n");
+    blockedList = Array.isArray(s.blocked) ? s.blocked.filter((b) => b && (b.sec || b.nick)) : [];
+    renderBlocked();
   });
 }, "扩展刚被重载：请关闭弹窗，再点一次工具栏图标打开");
+
+function renderBlocked() {
+  const ul = $("blocked");
+  ul.textContent = "";
+  blockedList.forEach((b, i) => {
+    const li = document.createElement("li");
+    li.className = "chip";
+    const name = document.createElement("span");
+    name.className = "chip-name";
+    name.textContent = b.nick || b.sec;
+    name.title = b.sec || b.nick;
+    const btn = document.createElement("button");
+    btn.className = "chip-x";
+    btn.type = "button";
+    btn.textContent = "移除";
+    btn.addEventListener("click", () => removeBlocked(i));
+    li.appendChild(name);
+    li.appendChild(btn);
+    ul.appendChild(li);
+  });
+  $("blocked-count").textContent = blockedList.length ? `${blockedList.length} 人` : "";
+  $("blocked-empty").style.display = blockedList.length ? "none" : "block";
+}
+
+function removeBlocked(i) {
+  const next = blockedList.filter((_, idx) => idx !== i);
+  safe(() => {
+    chrome.storage.sync.set({ blocked: next }, () => {
+      if (chrome.runtime.lastError) return;
+      blockedList = next;
+      renderBlocked();
+      showHint("已移除");
+    });
+  }, "扩展刚被重载：请关闭弹窗重开后再操作");
+}
 
 // 计数每秒自刷新，不用关弹窗重开
 let statsTimer = 0;
@@ -36,7 +76,7 @@ const renderStats = () => {
     return;
   }
   chrome.storage.local.get(
-    { capturedCount: 0, seamlessCount: 0, skippedCount: 0, hookTs: 0, contentTs: 0, patchMode: "", cfgHours: 0 },
+    { capturedCount: 0, seamlessCount: 0, skippedCount: 0, hookTs: 0, contentTs: 0, patchMode: "", cfgHours: 0, loggedIn: 1 },
     (st) => {
       if (chrome.runtime.lastError) return;
       const now = Date.now();
@@ -48,7 +88,9 @@ const renderStats = () => {
         `无痕屏蔽 ${st.seamlessCount} 个　滚动跳过 ${st.skippedCount} 个`,
         `页面生效阈值：${st.cfgHours} 小时`,
       ];
-      if (!ok(st.contentTs, 15000)) {
+      if (ok(st.contentTs, 15000) && !st.loggedIn) {
+        lines.push("未检测到抖音登录态：右键菜单里不会出现「拉黑该作者」。");
+      } else if (!ok(st.contentTs, 15000)) {
         lines.push("请先在抖音页按 F12 打开控制台，把下方两项检查的结果发我：");
         lines.push("1. document.documentElement.dataset.dyMainHook");
         lines.push("2. 控制台左上角上下文里是否出现本扩展名");

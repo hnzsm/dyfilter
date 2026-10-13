@@ -76,3 +76,21 @@ button:active { filter: brightness(.94); }
 .stats-card { background: var(--brand-soft); border-color: #ffe0e7; }
 .stats-head { font-weight: 600; color: var(--brand); margin-bottom: 6px; font-size: 12px; }
 .stats { margin: 0; color: #6b7280; font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
+
+/* 已拉黑博主 */
+.list-head { display: flex; align-items: baseline; justify-content: space-between; }
+.count { color: var(--sub); font-size: 12px; }
+.empty { margin: 0; color: var(--sub); font-size: 12px; }
+.chips { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; }
+.chips:empty { display: none; }
+.chip {
+  display: flex; align-items: center; gap: 6px; max-width: 100%;
+  background: #fbfbfc; border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 4px 3px 10px; font-size: 12px;
+}
+.chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-x {
+  flex: none; border: none; background: transparent; color: var(--sub);
+  font-size: 12px; padding: 2px 6px; border-radius: 999px; cursor: pointer;
+}
+.chip-x:hover { background: var(--brand-soft); color: var(--brand); filter: none; }

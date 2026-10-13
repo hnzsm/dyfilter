@@ -34,7 +34,17 @@
     <section class="card">
       <label class="field-label" for="keywords">屏蔽关键字</label>
       <p class="hint-sub">每行一个，匹配标题或作者名</p>
-      <textarea id="keywords" rows="5" placeholder="例如：&#10;直播预告&#10;某某博主"></textarea>
+      <textarea id="keywords" rows="5" placeholder="例如：&#10;直播预告&#10;某类内容"></textarea>
+    </section>
+
+    <section class="card">
+      <div class="list-head">
+        <span class="field-label">已拉黑博主</span>
+        <span id="blocked-count" class="count"></span>
+      </div>
+      <p class="hint-sub">在抖音页右键视频 →「拉黑该作者」；按账号 ID 拉黑，改名也照样拦</p>
+      <ul id="blocked" class="chips"></ul>
+      <p id="blocked-empty" class="empty">还没有拉黑任何人</p>
     </section>
 
     <div class="actions">

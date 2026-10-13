@@ -3,7 +3,7 @@ const MENU_ID = "dyfilter-block-author";
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: MENU_ID,
-    title: "屏蔽这个博主",
+    title: "拉黑该作者",
     contexts: ["page", "video"],
     // 只在抖音页出现，其它站点看不到这一项
     documentUrlPatterns: ["https://www.douyin.com/*"],

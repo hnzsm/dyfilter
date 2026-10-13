@@ -11,11 +11,12 @@
   setInterval(beat, 10000);
 
   // 配置来源优先级：localStorage（跨世界共享、document_start 即就绪）> dataset > 默认值。
-  const CFG_DEFAULT = { enabled: true, hours: 720, keywords: [] };
+  const CFG_DEFAULT = { enabled: true, hours: 720, keywords: [], blocked: [] };
   const sanitize = (c) => ({
     enabled: c && typeof c.enabled === "boolean" ? c.enabled : CFG_DEFAULT.enabled,
     hours: c && Number.isFinite(c.hours) && c.hours > 0 ? c.hours : CFG_DEFAULT.hours,
     keywords: c && Array.isArray(c.keywords) ? c.keywords : [],
+    blocked: c && Array.isArray(c.blocked) ? c.blocked.filter((b) => b && (b.sec || b.nick)) : [],
   });
   const getCfg = () => {
     try {
@@ -41,6 +42,7 @@
   const SUB_KEYS = ["aweme", "aweme_info", "author", "owner", "user", "anchor", "room", "room_data", "extra_info", "data"];
   const TITLE_KEYS = ["desc", "title", "live_title", "status", "content"];
   const NICK_KEYS = ["nickname", "nick_name", "author_nickname"];
+  const SEC_KEYS = ["sec_uid", "sec_user_id", "user_sec_uid", "uid_str"];
 
   const isObj = (o) => !!o && typeof o === "object" && !Array.isArray(o);
   const strOf = (o, keys) => {
@@ -81,17 +83,30 @@
 
   const cardTitle = (o) => fieldOf(o, TITLE_KEYS);
   const cardNick = (o) => fieldOf(o, NICK_KEYS);
+  const cardSec = (o) => fieldOf(o, SEC_KEYS);
   const cardMeta = (o) => ({
     id: idOf(o),
     desc: cardTitle(o),
     nick: cardNick(o),
+    sec: cardSec(o),
     ct: timeOf(o),
     live: isLive(o) ? 1 : 0,
   });
 
+  // 拉黑：优先按 sec_uid 精确匹配（改名不影响）；卡片没带 sec_uid 时退回昵称精确匹配。
+  const isBlacklisted = (m, cfg) => {
+    const nick = m.nick.toLowerCase();
+    for (const b of cfg.blocked) {
+      if (m.sec && b.sec && m.sec === b.sec) return true;
+      if (!m.sec && nick && b.nick && nick === String(b.nick).trim().toLowerCase()) return true;
+    }
+    return false;
+  };
+
   const isBlocked = (o, now, cfg) => {
     const m = cardMeta(o);
-    // 直播没有"发布时间"可言（create_time 是开播时间），只受关键字约束
+    if (isBlacklisted(m, cfg)) return true;
+    // 直播没有"发布时间"可言（create_time 是开播时间），只受关键字屏蔽
     if (!m.live && m.ct > 0 && (now - m.ct) / 3600 > cfg.hours) return true;
     const text = `${m.desc} ${m.nick}`.toLowerCase();
     for (const kw of cfg.keywords) {

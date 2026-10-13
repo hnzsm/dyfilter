@@ -1,6 +1,6 @@
 (() => {
-  const LEGACY_DEFAULTS = { enabled: true, hours: null, days: null, keywords: [] };
-  let settings = { enabled: true, hours: 720, keywords: [] };
+  const LEGACY_DEFAULTS = { enabled: true, hours: null, days: null, keywords: [], blocked: [] };
+  let settings = { enabled: true, hours: 720, keywords: [], blocked: [] };
   const metas = new Map();
   let currentVid = null;
   let lastSkipAt = 0;
@@ -15,6 +15,7 @@
       enabled: settings.enabled,
       hours: settings.hours,
       keywords: settings.keywords,
+      blocked: settings.blocked,
     });
     document.documentElement.dataset.dyConfig = cfg;
     try {
@@ -34,6 +35,7 @@
         enabled: stored.enabled !== false,
         hours: normalizeHours(stored),
         keywords: Array.isArray(stored.keywords) ? stored.keywords : [],
+        blocked: Array.isArray(stored.blocked) ? stored.blocked.filter((b) => b && (b.sec || b.nick)) : [],
       };
       writeConfig();
     });
@@ -58,6 +60,14 @@
   };
 
   let hbTimer = 0;
+  // 拉黑要有账号才有意义，未登录时不往抖音自己的菜单里塞这一行。
+  // 读不到 cookie（被内核挡掉）时不作为依据，宁可用不可少。
+  const LOGIN_COOKIE = /(?:^|;\s*)(?:sessionid|session_t|sid_guard)=/;
+  const loggedIn = () => {
+    const raw = typeof document.cookie === "string" ? document.cookie : "";
+    return raw ? LOGIN_COOKIE.test(raw) : true;
+  };
+
   const heartbeat = () => {
     if (!ctxOk()) {
       clearInterval(hbTimer);
@@ -69,6 +79,8 @@
       hookTs: Number(ds.dyMainHook || 0),
       patchMode: ds.dyPatchMode || "",
       cfgHours: settings.hours,
+      blockedCount: settings.blocked.length,
+      loggedIn: loggedIn() ? 1 : 0,
     });
   };
   // 每次页面加载重新计数，弹窗里的数字只反映当前这一页
@@ -114,6 +126,8 @@
     if (droppedIds.has(vid)) return { reason: "接口层漏网" };
     const meta = metas.get(vid);
     if (!meta) return null;
+    const hit = blacklistedHit(meta);
+    if (hit) return { reason: `已拉黑「${hit}」`, meta };
     // 直播卡片的 create_time 是开播时间，不参与"发布超过 N 小时"判定
     if (meta.ct > 0 && !meta.live) {
       const ageHours = (Date.now() / 1000 - meta.ct) / 3600;
@@ -125,6 +139,16 @@
       if (k && text.includes(k)) return { reason: `命中关键字「${kw.trim()}」`, meta };
     }
     return null;
+  }
+
+  // 拉黑匹配：有 sec_uid 就只认 sec_uid（改名不影响），卡片没带 sec_uid 时退回昵称精确匹配
+  function blacklistedHit(meta) {
+    const nick = String(meta.nick || "").trim().toLowerCase();
+    for (const b of settings.blocked) {
+      if (meta.sec && b.sec && meta.sec === b.sec) return b.nick || meta.nick || "该博主";
+      if (!meta.sec && nick && b.nick && nick === String(b.nick).trim().toLowerCase()) return b.nick;
+    }
+    return "";
   }
 
   function evaluate(vid, force) {
@@ -178,12 +202,46 @@
   );
 
   function findCurrentVid() {
+    const v = playingVideo();
+    const holder = v && v.closest("[data-e2e-vid]");
+    return holder ? holder.getAttribute("data-e2e-vid") : null;
+  }
+
+  function playingVideo() {
     for (const v of document.querySelectorAll("video")) {
       if (v.paused || v.ended || v.readyState < 2) continue;
-      const holder = v.closest("[data-e2e-vid]");
-      if (holder) return holder.getAttribute("data-e2e-vid");
+      return v;
     }
     return null;
+  }
+
+  // 接口元数据没认出来时退回页面 DOM：从播放中的 video 往上找作者链接，
+  // 抖音的作者链接形如 /user/<sec_uid>，昵称就是链接文字。
+  function authorFromDom() {
+    let node = playingVideo();
+    for (let up = 0; node && up < 8; up += 1, node = node.parentElement) {
+      const link = node.querySelector && node.querySelector('a[href*="/user/"]');
+      if (!link) continue;
+      const nick = (link.textContent || "").trim();
+      if (!nick) return null;
+      const m = /\/user\/([^?#/]+)/.exec(link.href || "");
+      let sec = "";
+      try {
+        sec = m ? decodeURIComponent(m[1]) : "";
+      } catch (e) {
+        sec = m ? m[1] : "";
+      }
+      return { nick, sec };
+    }
+    return null;
+  }
+
+  function currentAuthor() {
+    const vid = currentVid || findCurrentVid();
+    const meta = vid ? metas.get(vid) : null;
+    if (meta && meta.nick) return { nick: String(meta.nick).trim(), sec: meta.sec || "", via: "接口" };
+    const dom = authorFromDom();
+    return dom ? { ...dom, via: "页面" } : null;
   }
 
   let toastEl = null;
@@ -203,29 +261,31 @@
     toastTimer = setTimeout(() => (toastEl.style.display = "none"), ms);
   }
 
-  // 右键菜单「屏蔽这个博主」：把当前卡片作者昵称追加进关键字黑名单。
-  // 复用现有关键字通路 = 同一个博主的视频和直播都会被拦下，弹窗里也能直接看到/删除。
+  // 拉黑走独立的 blocked 列表（按 sec_uid 认人），不再往关键字里塞昵称。
   function blockCurrentAuthor() {
-    const vid = currentVid || findCurrentVid();
-    const meta = vid ? metas.get(vid) : null;
-    const nick = meta && meta.nick ? String(meta.nick).trim() : "";
-    if (!nick) {
-      toast("没识别出当前博主，等视频播起来再右键", 3000);
+    const who = currentAuthor();
+    if (!who) {
+      toast(`没认出手上这条的作者（已捕获 ${metas.size} 条），等它播起来再试`, 3500);
       return;
     }
     chrome.storage.sync.get(LEGACY_DEFAULTS, (stored) => {
       if (!ctxOk() || chrome.runtime.lastError) return;
-      const list = Array.isArray(stored.keywords) ? stored.keywords : [];
-      const lower = nick.toLowerCase();
-      if (list.some((k) => String(k).trim().toLowerCase() === lower)) {
-        toast(`「${nick}」已经在黑名单里`, 2500);
+      const list = Array.isArray(stored.blocked) ? stored.blocked.filter((b) => b && (b.sec || b.nick)) : [];
+      const lower = who.nick.toLowerCase();
+      if (list.some((b) => (who.sec && b.sec === who.sec) || String(b.nick || "").toLowerCase() === lower)) {
+        toast(`「${who.nick}」已经拉黑了`, 2500);
         return;
       }
       chrome.storage.sync.set(
-        { enabled: stored.enabled !== false, hours: normalizeHours(stored), keywords: [...list, nick] },
+        {
+          enabled: stored.enabled !== false,
+          hours: normalizeHours(stored),
+          keywords: Array.isArray(stored.keywords) ? stored.keywords : [],
+          blocked: [...list, { sec: who.sec, nick: who.nick }],
+        },
         () => {
           if (!ctxOk() || chrome.runtime.lastError) return;
-          toast(`已屏蔽博主：${nick}`, 2500);
+          toast(`已拉黑：${who.nick}`, 2500);
         }
       );
     });
@@ -240,8 +300,8 @@
   }
 
   // 播放器区域被抖音自己 preventDefault 接管，弹的是页面画的菜单，浏览器原生菜单看不到。
-  // 这里在它的菜单弹出后补一行「屏蔽这个博主」，样式直接克隆它自己的一行。
-  const MENU_LABEL = "屏蔽这个博主";
+  // 这里在它的菜单弹出后补一行「拉黑该作者」，样式直接克隆它自己的一行。
+  const MENU_LABEL = "拉黑该作者";
   let menuAnchor = null; // 最近一次右键的位置，用来认出"刚弹出来的就是那个菜单"
 
   const rowsOf = (el) => {
@@ -257,6 +317,7 @@
 
   const looksLikeMenu = (el) => {
     if (!el || el.nodeType !== 1 || !menuAnchor) return false;
+    if (!loggedIn()) return false;
     if (el.dataset.dyAuthorMenu) return false;
     if (Date.now() - menuAnchor.at > 1500) return false;
     const pos = window.getComputedStyle ? window.getComputedStyle(el).position : "";

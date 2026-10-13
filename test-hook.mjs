@@ -39,10 +39,10 @@ new Function(src)();
 
 const H = 3600;
 const now = Math.floor(Date.now() / 1000);
-const item = (id, ageH, desc = "", nick = "") => ({
+const item = (id, ageH, desc = "", nick = "", sec = "") => ({
   aweme_id: id,
   desc,
-  author: { nickname: nick },
+  author: { nickname: nick, ...(sec ? { sec_uid: sec } : {}) },
   create_time: now - ageH * H,
 });
 const feed = (list) => JSON.stringify({ aweme_list: list, has_more: 1, status_code: 0 });
@@ -64,8 +64,8 @@ const read = (url, payload, asObject = false) => {
 };
 
 const URL_FEED = "https://www.douyin.com/aweme/v1/web/tab/feed/?x=1";
-const setCfg = (hours, keywords = []) =>
-  localStorage.setItem("dyfilter-cfg", JSON.stringify({ enabled: true, hours, keywords }));
+const setCfg = (hours, keywords = [], blocked = []) =>
+  localStorage.setItem("dyfilter-cfg", JSON.stringify({ enabled: true, hours, keywords, blocked }));
 
 const results = [];
 const t = (name, cond, extra = "") => results.push(`${cond ? "PASS" : "FAIL"} ${name}${extra ? " | " + extra : ""}`);
@@ -155,7 +155,7 @@ const liveCard = (id, nick, title, extra = {}) => ({
   aweme_id: id,
   aweme_type: 2,
   room_id: String(Number(id.slice(1)) + 100),
-  owner: { nickname: nick },
+  owner: { nickname: nick, sec_uid: extra.sec || "" },
   extra_info: { live_title: title },
   ...extra,
 });
@@ -169,9 +169,9 @@ r = read(
 t("直播命中作者名被删", !r.ids.includes("L1"), r.ids.join(","));
 t("未命中关键字的直播保留", r.ids.includes("L2"), r.ids.join(","));
 setCfg(1, []);
-r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L8", "甲", "跳舞"), liveCard("L9", "乙", "唱歌")] }));
-t("直播不被时间阈值误杀", JSON.stringify(r.ids) === '["L8","L9"]', r.ids.join(","));
-t("视频仍按时间删除", !r.ids.includes("v1"), r.ids.join(","));
+r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L8", "甲", "跳舞"), liveCard("L9", "乙", "唱歌"), item("v1", 9999)] }));
+t("直播不被时间阈值误杀", r.ids.includes("L8") && r.ids.includes("L9"), r.ids.join(","));
+t("同页视频仍按时间删除", !r.ids.includes("v1"), r.ids.join(","));
 
 setCfg(1, ["深夜"]);
 r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L3", "某台", "深夜电台"), item("v2", 0)] }));
@@ -198,6 +198,25 @@ r = read(
   JSON.stringify({ aweme_list: [liveCard("L6", "xx主播", "聊天"), liveCard("L7", "正常台", "跳舞")] })
 );
 t("live/feed 路径同样过滤", JSON.stringify(r.ids) === '["L7"]', r.ids.join(","));
+
+// 拉黑名单：优先按 sec_uid 认人，改名不影响；卡片没带 sec_uid 时按昵称精确匹配
+setCfg(99999, [], [{ sec: "SEC_A", nick: "旧名字" }]);
+r = read(
+  URL_FEED,
+  feed([item("b1", 1, "正常", "改叫新名字了", "SEC_A"), item("b2", 1, "正常", "路人甲", "SEC_B")])
+);
+t("按 sec_uid 拉黑（昵称已改也拦得住）", !r.ids.includes("b1"), r.ids.join(","));
+t("未拉黑的 sec_uid 不受影响", r.ids.includes("b2"), r.ids.join(","));
+
+setCfg(99999, [], [{ sec: "", nick: "甲" }]);
+r = read(URL_FEED, feed([item("b3", 1, "正常", "甲"), item("b4", 1, "正常", "甲方爸爸")]));
+t("无 sec_uid 时按昵称精确拉黑", !r.ids.includes("b3"), r.ids.join(","));
+t("昵称精确匹配不做子串（不误伤同名前缀）", r.ids.includes("b4"), r.ids.join(","));
+
+setCfg(99999, [], [{ sec: "SEC_L", nick: "某主播" }]);
+r = read(URL_FEED, JSON.stringify({ aweme_list: [liveCard("L10", "某主播", "聊天", { sec: "SEC_L" }), liveCard("L11", "别的台", "唱歌", { sec: "SEC_M" })] }));
+t("直播按 sec_uid 拉黑", !r.ids.includes("L10"), r.ids.join(","));
+t("未拉黑的直播保留", r.ids.includes("L11"), r.ids.join(","));
 
 console.log(results.join("\n"));
 console.log(results.some((x) => x.startsWith("FAIL")) ? "SOME FAILED" : "ALL PASS");
