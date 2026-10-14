@@ -11,12 +11,11 @@
   setInterval(beat, 10000);
 
   // 配置来源优先级：localStorage（跨世界共享、document_start 即就绪）> dataset > 默认值。
-  const CFG_DEFAULT = { enabled: true, hours: 720, keywords: [], blocked: [] };
+  const CFG_DEFAULT = { enabled: true, hours: 720, keywords: [] };
   const sanitize = (c) => ({
     enabled: c && typeof c.enabled === "boolean" ? c.enabled : CFG_DEFAULT.enabled,
     hours: c && Number.isFinite(c.hours) && c.hours > 0 ? c.hours : CFG_DEFAULT.hours,
     keywords: c && Array.isArray(c.keywords) ? c.keywords : [],
-    blocked: c && Array.isArray(c.blocked) ? c.blocked.filter((b) => b && (b.sec || b.nick)) : [],
   });
   const getCfg = () => {
     try {
@@ -42,7 +41,6 @@
   const SUB_KEYS = ["aweme", "aweme_info", "author", "owner", "user", "anchor", "room", "room_data", "extra_info", "data"];
   const TITLE_KEYS = ["desc", "title", "live_title", "status", "content"];
   const NICK_KEYS = ["nickname", "nick_name", "author_nickname"];
-  const SEC_KEYS = ["sec_uid", "sec_user_id", "user_sec_uid", "uid_str"];
 
   const isObj = (o) => !!o && typeof o === "object" && !Array.isArray(o);
   const strOf = (o, keys) => {
@@ -83,43 +81,17 @@
 
   const cardTitle = (o) => fieldOf(o, TITLE_KEYS);
   const cardNick = (o) => fieldOf(o, NICK_KEYS);
-  const cardSec = (o) => fieldOf(o, SEC_KEYS);
-  // 播放地址：content.js 用它把"正在播的 video"对回接口卡片，不依赖 data-e2e-vid
-  const playUrlOf = (o) => {
-    const v = isObj(o) && o.video;
-    if (!isObj(v)) return "";
-    const lists = [
-      isObj(v.play_addr) && v.play_addr.url_list,
-      v.url_list,
-      isObj(v.download_addr) && v.download_addr.url_list,
-    ];
-    for (const list of lists) if (Array.isArray(list) && typeof list[0] === "string") return list[0];
-    return "";
-  };
   const cardMeta = (o) => ({
     id: idOf(o),
     desc: cardTitle(o),
     nick: cardNick(o),
-    sec: cardSec(o),
-    url: playUrlOf(o),
     ct: timeOf(o),
     live: isLive(o) ? 1 : 0,
   });
 
-  // 拉黑：优先按 sec_uid 精确匹配（改名不影响）；卡片没带 sec_uid 时退回昵称精确匹配。
-  const isBlacklisted = (m, cfg) => {
-    const nick = m.nick.toLowerCase();
-    for (const b of cfg.blocked) {
-      if (m.sec && b.sec && m.sec === b.sec) return true;
-      if (!m.sec && nick && b.nick && nick === String(b.nick).trim().toLowerCase()) return true;
-    }
-    return false;
-  };
-
   const isBlocked = (o, now, cfg) => {
     const m = cardMeta(o);
-    if (isBlacklisted(m, cfg)) return true;
-    // 直播没有"发布时间"可言（create_time 是开播时间），只受关键字屏蔽
+    // 直播没有"发布时间"可言（create_time 是开播时间），只受关键字约束
     if (!m.live && m.ct > 0 && (now - m.ct) / 3600 > cfg.hours) return true;
     const text = `${m.desc} ${m.nick}`.toLowerCase();
     for (const kw of cfg.keywords) {
@@ -224,35 +196,13 @@
     return { dropped };
   };
 
-  // content.js 在 document_idle 才挂载，首页那批响应早于它的监听器，postMessage 错过就补不回来了。
-  // 所以再往 localStorage 落一份（和配置同一条已验证可靠的跨世界通道），content 侧按需回读。
-  const MIRROR_MAX = 120;
-  const mirror = (metas) => {
-    try {
-      const prev = JSON.parse(localStorage.getItem("dyfilter-feed") || "[]");
-      const list = Array.isArray(prev) ? prev : [];
-      const seen = new Set(list.map((m) => String(m && m.id)));
-      for (const m of metas) {
-        const k = String(m && m.id);
-        if (k && k !== "undefined" && !seen.has(k)) {
-          seen.add(k);
-          list.push(m);
-        }
-      }
-      localStorage.setItem("dyfilter-feed", JSON.stringify(list.slice(-MIRROR_MAX)));
-    } catch (e) {}
-  };
-
   // 采集元数据（供 content.js 兜底判定），每个实例只做一次
   const collect = (xhr, cards) => {
     if (xhr.__dyCollected) return;
     if (!cards.length) return;
     xhr.__dyCollected = true;
     const metas = metasOf(cards);
-    if (metas.length) {
-      post({ type: "feed", metas });
-      mirror(metas);
-    }
+    if (metas.length) post({ type: "feed", metas });
   };
 
   const process = (xhr, payload, isText) => {
@@ -404,46 +354,4 @@
   };
 
   document.documentElement.dataset.dyPatchMode = protoOk ? "proto" : "instance";
-
-  // 拉黑请求必须由页面自己的网络层发出：抖音的安全 SDK 包了 fetch/XHR 并补风控头，
-  // 扩展 isolated world 里的裸 fetch 会被 WAF 直接 403（实测连 JSON 体都没有）。
-  // 通道：content.js 写 localStorage['dyfilter-block-req']，这里取走、发请求、把回包写进 'dyfilter-block-res'。
-  const BLOCK_REQ = "dyfilter-block-req";
-  const BLOCK_RES = "dyfilter-block-res";
-  const BLOCK_PATH = "/aweme/v1/web/user/block/";
-  const BLOCK_QUERY =
-    "device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=2&update_version_code=170400&version_code=170400&version_name=17.4.0&cookie_enabled=true&platform=PC";
-  let lastBlockId = "";
-
-  const runBlock = (req) => {
-    const done = (status, text) => {
-      try {
-        localStorage.setItem(BLOCK_RES, JSON.stringify({ id: req.id, status, text: String(text || "").slice(0, 400) }));
-      } catch (e) {}
-    };
-    try {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${BLOCK_PATH}?${BLOCK_QUERY}`, true);
-      xhr.withCredentials = true;
-      xhr.setRequestHeader("content-type", "application/x-www-form-urlencoded");
-      xhr.onreadystatechange = () => {
-        if (xhr.readyState === 4) done(xhr.status, xhr.responseText);
-      };
-      xhr.onerror = () => done(0, "");
-      xhr.send(`block_type=0&sec_user_id=${encodeURIComponent(req.sec)}&source=0`);
-    } catch (e) {
-      done(-1, String((e && e.message) || e).slice(0, 120));
-    }
-  };
-
-  setInterval(() => {
-    let req = null;
-    try {
-      const raw = localStorage.getItem(BLOCK_REQ);
-      if (raw) req = JSON.parse(raw);
-    } catch (e) {}
-    if (!req || !req.id || !req.sec || req.id === lastBlockId) return;
-    lastBlockId = req.id;
-    runBlock(req);
-  }, 250);
 })();

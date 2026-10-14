@@ -1,12 +1,9 @@
 {
   "manifest_version": 3,
   "name": "抖音推荐流过滤器",
-  "version": "0.5.7",
-  "description": "按发布日期、关键字和拉黑博主自动跳过抖音网页版首页推荐流的内容",
-  "permissions": ["storage", "contextMenus"],
-  "background": {
-    "service_worker": "background.js"
-  },
+  "version": "0.3.0",
+  "description": "按发布日期和关键字自动跳过抖音网页版首页推荐流的视频",
+  "permissions": ["storage"],
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
