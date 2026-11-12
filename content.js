@@ -9,6 +9,11 @@
   let cooldownUntil = 0;
   let seamlessCount = 0; // 接口层直接删掉的条数
   let skippedCount = 0; // 兜底滚动跳过触发的次数
+  // 用户主动往回翻到的视频，本次会话不再自动过滤；往前翻时过滤照常
+  const exemptVids = new Set();
+  const playOrder = [];
+  let orderPos = -1;
+  let backIntentUntil = 0;
 
   const writeConfig = () => {
     const cfg = JSON.stringify({
@@ -127,8 +132,42 @@
     return null;
   }
 
+  // 回看豁免的主判据是"当前视频在播放顺序里往回走了"：抖音的「上一个」可能是
+  // 按键、滚轮，也可能是它自绘的按钮，只认按键会漏。按键/滚轮只作补充信号，
+  // 且必须是 isTrusted——我们自己合成的 ↓ 不算用户意图。
+  function notePlayback(vid) {
+    let idx = playOrder.indexOf(vid);
+    if (idx === -1) {
+      playOrder.push(vid);
+      idx = playOrder.length - 1;
+    }
+    const moved = idx !== orderPos;
+    const backward = moved && (idx < orderPos || Date.now() < backIntentUntil);
+    orderPos = idx;
+    if (!backward || exemptVids.has(vid)) return;
+    exemptVids.add(vid);
+    consecutiveSkips = 0;
+    toast("已保留这条，不再自动过滤", 2000);
+  }
+
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.isTrusted && (e.key === "ArrowUp" || e.key === "PageUp")) backIntentUntil = Date.now() + 1500;
+    },
+    true
+  );
+  document.addEventListener(
+    "wheel",
+    (e) => {
+      if (e.isTrusted && e.deltaY < 0) backIntentUntil = Date.now() + 1500;
+    },
+    { capture: true, passive: true }
+  );
+
   function evaluate(vid, force) {
     if (!settings.enabled) return;
+    if (exemptVids.has(vid)) return;
     if (Date.now() < cooldownUntil) return;
     const hit = matchRule(vid);
     if (!hit) {
@@ -172,6 +211,7 @@
       const vid = holder.getAttribute("data-e2e-vid");
       if (!vid) return;
       currentVid = vid;
+      notePlayback(vid);
       evaluate(vid, vid !== lastSkipVid);
     },
     true
@@ -207,6 +247,7 @@
     const vid = findCurrentVid();
     if (!vid) return;
     currentVid = vid;
+    notePlayback(vid);
     evaluate(vid);
   }, 400);
 })();
